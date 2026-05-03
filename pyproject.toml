@@ -1,0 +1,19 @@
+[project]
+name = "sms-chatgpt"
+version = "0.1.0"
+description = "USB SMS daemon that creates short-lived Kubernetes chat pods per sender."
+requires-python = ">=3.11"
+dependencies = [
+  "kubernetes>=29.0.0",
+  "openai>=1.40.0",
+  "pyserial>=3.5",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+sms-chatgpt-daemon = "sms_chatgpt.daemon:main"
+sms-chatgpt-worker = "sms_chatgpt.worker:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
