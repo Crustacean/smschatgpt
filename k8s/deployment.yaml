@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sms-chatgpt-daemon
+  namespace: sms-chatgpt
+  labels:
+    app: sms-chatgpt-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sms-chatgpt-daemon
+  template:
+    metadata:
+      labels:
+        app: sms-chatgpt-daemon
+    spec:
+      serviceAccountName: sms-chatgpt-daemon
+      nodeSelector:
+        sms-chatgpt.usb-modem: "true"
+      containers:
+        - name: daemon
+          image: sms-chatgpt-daemon:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: sms-chatgpt-config
+            - secretRef:
+                name: sms-chatgpt-secrets
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: usb-bus
+              mountPath: /dev/bus/usb
+      volumes:
+        - name: usb-bus
+          hostPath:
+            path: /dev/bus/usb
+            type: Directory

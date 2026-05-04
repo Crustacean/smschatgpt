@@ -1,10 +1,10 @@
 # SMS ChatGPT
 
-`sms-chatgpt` is a Python daemon that watches SMS messages from a phone or GSM modem attached over USB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are capped at 140 characters. Pods are deleted after 60 seconds of inactivity.
+`sms-chatgpt` is a Python daemon that watches SMS messages from an Android phone over ADB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are capped at 140 characters. Pods are deleted after 60 seconds of inactivity.
 
 ## How It Works
 
-1. A user sends an SMS to the USB-attached phone/modem.
+1. A user sends an SMS to the USB-attached Android phone.
 2. The daemon polls unread SMS messages.
 3. For each sender, it creates or reuses a Kubernetes pod named `sms-chat-<hash>`.
 4. The daemon runs `sms-chatgpt-worker --message ...` inside that pod.
@@ -12,9 +12,15 @@
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
 
-## Important Hardware Note
+## Important Android/ADB Note
 
-Most Android/iPhone handsets do not expose SMS over USB as a simple serial modem. This project expects a GSM modem, LTE dongle, or phone that exposes an AT-command serial interface such as `/dev/ttyUSB0`. If your phone only supports ADB, add a new transport in `sms_chatgpt/sms.py`.
+Android allows ADB shell access to the SMS content provider on some devices/builds, which lets the daemon read inbound SMS with:
+
+```bash
+adb shell content query --uri content://sms/inbox
+```
+
+Silent SMS sending over ADB is not portable. Some Android/vendor builds expose a shell command or service call that can send SMS, while others block it. This project supports ADB receiving out of the box. By default it opens the SMS composer with the reply filled in; tap Send on the phone to deliver it. For automatic sending, use `ADB_SEND_MODE=template` with `ADB_SEND_COMMAND_TEMPLATE` or install a companion SMS app.
 
 ## Quick Start With Mock SMS
 
@@ -41,12 +47,93 @@ Responses are appended to `mock-outbox.txt`.
 
 Set `SESSION_BACKEND=kubernetes` when you want the real pod-per-sender behavior.
 
+## Android/ADB Setup
+
+Enable developer options and USB debugging on the Android phone, then authorize the computer.
+
+Install ADB on the host:
+
+```bash
+sudo apt-get install android-tools-adb
+```
+
+Confirm the phone is visible:
+
+```bash
+adb devices -l
+```
+
+Diagnose SMS access:
+
+```bash
+python3 -m sms_chatgpt.diagnose_adb
+```
+
+If you have more than one Android device attached, set:
+
+```bash
+ADB_SERIAL=<device-serial-from-adb-devices>
+```
+
+Run the daemon in ADB read mode:
+
+```bash
+SMS_BACKEND=adb SESSION_BACKEND=local LLM_PROVIDER=echo sms-chatgpt-daemon
+```
+
+The default ADB send mode is:
+
+```bash
+ADB_SEND_MODE=compose
+```
+
+This opens the SMS app with the generated reply filled in. For diagnostics:
+
+```bash
+python3 -m sms_chatgpt.diagnose_adb --send-to +254700000000
+```
+
+For non-interactive automatic sending, configure a device-specific command:
+
+```bash
+ADB_SEND_MODE=template
+ADB_SEND_COMMAND_TEMPLATE='<your command using {adb} {serial_args} {phone} {body}>'
+```
+
+Template variables:
+
+- `{adb}`: adb executable, shell-quoted.
+- `{serial_args}`: `-s <serial>` when `ADB_SERIAL` is set.
+- `{phone}`: destination number, shell-quoted.
+- `{body}`: reply body, shell-quoted and capped to 140 characters.
+
+For example, if your device has a helper command or app installed, the template might look like:
+
+```bash
+ADB_SEND_COMMAND_TEMPLATE='{adb} {serial_args} shell am broadcast -a com.example.SEND_SMS --es phone {phone} --es body {body}'
+```
+
+The exact send command depends on the Android build or helper app you install.
+
+For testing without sending or opening the composer:
+
+```bash
+ADB_SEND_MODE=log
+```
+
 ## Kubernetes Setup
+
+Label the Kubernetes node that has the Android phone attached:
+
+```bash
+kubectl label node <node-name> sms-chatgpt.usb-modem=true
+```
 
 Build and publish an image that contains this project:
 
 ```bash
-docker build -t sms-chatgpt:latest .
+docker build -f Dockerfile.daemon -t sms-chatgpt-daemon:latest .
+docker build -f Dockerfile -t sms-chatgpt-worker:latest .
 ```
 
 For a local cluster such as kind or minikube, load the image into the cluster or publish it to a registry and set `CHAT_POD_IMAGE`.
@@ -69,9 +156,24 @@ rules:
     verbs: ["create"]
 ```
 
-## Real SMS Modem
+The manifests in `k8s/` deploy the daemon, RBAC, config, and namespace. The daemon deployment mounts `/dev/bus/usb` from the node, so the pod is privileged and scheduled only on nodes labeled `sms-chatgpt.usb-modem=true`.
 
-Set:
+## Jenkins Deployment
+
+`Jenkinsfile` runs tests, builds two images, pushes them, and deploys to Kubernetes:
+
+- `Dockerfile.daemon` builds the long-running SMS daemon image.
+- `Dockerfile` builds the lightweight worker image used for per-sender chat pods.
+
+Before running the Jenkins job, update `IMAGE_REPOSITORY` in `Jenkinsfile`, then create these Jenkins credentials:
+
+- `docker-registry-credentials`: username/password or token for your container registry.
+- `kubeconfig`: kubeconfig file for your cluster.
+- `openai-api-key`: secret text containing your OpenAI API key.
+
+## AT Modem Alternative
+
+If you use a GSM/LTE modem dongle instead of Android ADB, set:
 
 ```bash
 SMS_BACKEND=at
@@ -85,6 +187,32 @@ The AT backend uses text mode commands:
 - `AT+CMGL="REC UNREAD"`
 - `AT+CMGS="<number>"`
 - `AT+CMGD=<index>`
+
+If the daemon does not reply, first test whether the modem exposes SMS:
+
+```bash
+python3 -m sms_chatgpt.diagnose_modem --port /dev/ttyUSB0
+python3 -m sms_chatgpt.diagnose_modem --port /dev/ttyUSB1
+```
+
+If `AT+CMGL="ALL"` shows your messages but the daemon does not process them, run the daemon with:
+
+```bash
+LOG_LEVEL=DEBUG SMS_MESSAGE_STATUS=ALL SMS_BACKEND=at SMS_SERIAL_PORT=/dev/ttyUSB0 SESSION_BACKEND=local LLM_PROVIDER=echo sms-chatgpt-daemon
+```
+
+Some phones expose SMS in SIM storage and others in phone storage. Test both:
+
+```bash
+python3 -m sms_chatgpt.diagnose_modem --port /dev/ttyUSB0 --storage SM
+python3 -m sms_chatgpt.diagnose_modem --port /dev/ttyUSB0 --storage ME
+```
+
+Then run with the storage that lists inbound messages:
+
+```bash
+SMS_STORAGE=SM SMS_MESSAGE_STATUS=ALL SMS_BACKEND=at SMS_SERIAL_PORT=/dev/ttyUSB0 SESSION_BACKEND=local LLM_PROVIDER=echo sms-chatgpt-daemon
+```
 
 ## Environment
 

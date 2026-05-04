@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 
 from .config import load_settings
-from .k8s import ChatPodManager
 from .llm import build_llm_client
 from .messages import clamp_sms_reply
-from .sms import AtModemSmsTransport, MockSmsTransport, SmsTransport
+from .sms import AdbSmsTransport, AtModemSmsTransport, MockSmsTransport, SmsTransport
 
 LOGGER = logging.getLogger(__name__)
 SHOULD_STOP = False
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(message)s")
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
@@ -45,12 +46,26 @@ def _build_sms_transport(settings) -> SmsTransport:
     if settings.sms_backend == "mock":
         return MockSmsTransport(settings.mock_inbox_file, settings.mock_outbox_file)
     if settings.sms_backend == "at":
-        return AtModemSmsTransport(settings.sms_serial_port, settings.sms_baudrate)
+        return AtModemSmsTransport(
+            settings.sms_serial_port,
+            settings.sms_baudrate,
+            settings.sms_message_status,
+            settings.sms_storage,
+        )
+    if settings.sms_backend == "adb":
+        return AdbSmsTransport(
+            settings.adb_path,
+            settings.adb_serial,
+            settings.adb_send_mode,
+            settings.adb_send_command_template,
+        )
     raise ValueError(f"Unsupported SMS_BACKEND={settings.sms_backend!r}")
 
 
 def _build_chat_manager(settings):
     if settings.session_backend == "kubernetes":
+        from .k8s import ChatPodManager
+
         return ChatPodManager(settings)
     if settings.session_backend == "local":
         return LocalChatManager(settings)
@@ -73,3 +88,7 @@ def _stop(signum, frame) -> None:
     del signum, frame
     global SHOULD_STOP
     SHOULD_STOP = True
+
+
+if __name__ == "__main__":
+    main()

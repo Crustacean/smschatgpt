@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sms-chatgpt-config
+  namespace: sms-chatgpt
+data:
+  SMS_BACKEND: "adb"
+  SMS_SERIAL_PORT: "/dev/ttyUSB0"
+  SMS_BAUDRATE: "115200"
+  SMS_POLL_SECONDS: "5"
+  ADB_PATH: "adb"
+  ADB_SERIAL: ""
+  ADB_SEND_COMMAND_TEMPLATE: ""
+  SESSION_BACKEND: "kubernetes"
+  KUBERNETES_NAMESPACE: "sms-chatgpt"
+  CHAT_POD_IMAGE: "sms-chatgpt-worker:latest"
+  CHAT_POD_IDLE_SECONDS: "60"
+  CHAT_POD_TIMEOUT_SECONDS: "30"
+  LLM_PROVIDER: "openai"
+  OPENAI_MODEL: "gpt-4o-mini"

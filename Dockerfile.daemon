@@ -1,0 +1,18 @@
+FROM python:3.12-alpine
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apk add --no-cache android-tools
+
+RUN pip install --no-cache-dir \
+    "kubernetes>=29.0.0" \
+    "openai>=1.40.0" \
+    "pyserial>=3.5" \
+    "python-dotenv>=1.0.1"
+
+COPY sms_chatgpt ./sms_chatgpt
+
+ENTRYPOINT ["python", "-m", "sms_chatgpt.daemon"]

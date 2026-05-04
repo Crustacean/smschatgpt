@@ -3,7 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv() -> None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -12,6 +16,12 @@ class Settings:
     sms_serial_port: str
     sms_baudrate: int
     sms_poll_seconds: float
+    sms_message_status: str
+    sms_storage: str | None
+    adb_path: str
+    adb_serial: str | None
+    adb_send_mode: str
+    adb_send_command_template: str | None
     session_backend: str
     kubernetes_namespace: str
     chat_pod_image: str
@@ -31,6 +41,12 @@ def load_settings() -> Settings:
         sms_serial_port=os.getenv("SMS_SERIAL_PORT", "/dev/ttyUSB0"),
         sms_baudrate=int(os.getenv("SMS_BAUDRATE", "115200")),
         sms_poll_seconds=float(os.getenv("SMS_POLL_SECONDS", "5")),
+        sms_message_status=os.getenv("SMS_MESSAGE_STATUS", "REC UNREAD"),
+        sms_storage=os.getenv("SMS_STORAGE") or None,
+        adb_path=os.getenv("ADB_PATH", "adb"),
+        adb_serial=os.getenv("ADB_SERIAL") or None,
+        adb_send_mode=os.getenv("ADB_SEND_MODE", "compose").lower(),
+        adb_send_command_template=os.getenv("ADB_SEND_COMMAND_TEMPLATE") or None,
         session_backend=os.getenv("SESSION_BACKEND", "kubernetes").lower(),
         kubernetes_namespace=os.getenv("KUBERNETES_NAMESPACE", "default"),
         chat_pod_image=os.getenv("CHAT_POD_IMAGE", "sms-chatgpt:latest"),
