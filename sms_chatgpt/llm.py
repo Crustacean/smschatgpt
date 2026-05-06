@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import abc
 
-from openai import OpenAI
-
 from .messages import clamp_sms_reply
 
 
@@ -20,6 +18,8 @@ class EchoLlmClient(LlmClient):
 
 class OpenAiLlmClient(LlmClient):
     def __init__(self, api_key: str | None, model: str) -> None:
+        from openai import OpenAI
+
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
         self.client = OpenAI(api_key=api_key)
