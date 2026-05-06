@@ -64,12 +64,16 @@ class AdbSmsTransport(SmsTransport):
         serial: str | None = None,
         send_mode: str = "compose",
         send_command_template: str | None = None,
+        state_file: str = "./adb-sms-state.txt",
+        skip_existing: bool = True,
     ) -> None:
         self.adb_path = adb_path
         self.serial = serial
         self.send_mode = send_mode
         self.send_command_template = send_command_template
-        self._seen_ids: set[int] = set()
+        self.state_file = Path(state_file)
+        self.skip_existing = skip_existing
+        self.last_processed_id = self._load_last_processed_id()
         self._run_adb(["get-state"])
 
     def receive_unread(self) -> list[SmsMessage]:
@@ -82,11 +86,9 @@ class AdbSmsTransport(SmsTransport):
                 "content://sms/inbox",
                 "--projection",
                 "_id,address,body,read",
-                "--where",
-                "read=0",
             ]
         )
-        messages: list[SmsMessage] = []
+        rows: list[SmsMessage] = []
         for row in output.splitlines():
             parsed = self._parse_content_row(row)
             if not parsed:
@@ -97,11 +99,18 @@ class AdbSmsTransport(SmsTransport):
             if not message_id or not address or body is None:
                 continue
             index = int(message_id)
-            if index in self._seen_ids:
+            if index <= self.last_processed_id:
                 continue
-            messages.append(SmsMessage(sender=address, body=body, index=index))
-            self._seen_ids.add(index)
-        return messages
+            rows.append(SmsMessage(sender=address, body=body, index=index))
+
+        if self.last_processed_id == 0 and self.skip_existing:
+            highest_seen = self._highest_message_id(output)
+            if highest_seen:
+                self._save_last_processed_id(highest_seen)
+                LOGGER.info("Initialized ADB SMS high-water mark at _id=%s", highest_seen)
+            return []
+
+        return sorted(rows, key=lambda message: message.index or 0)
 
     def send_sms(self, phone_number: str, body: str) -> None:
         body = clamp_sms_reply(body)
@@ -109,7 +118,7 @@ class AdbSmsTransport(SmsTransport):
             LOGGER.warning("ADB SMS reply for %s: %s", phone_number, body)
             return
         if self.send_mode == "compose":
-            self._run_adb(
+            output = self._run_adb(
                 [
                     "shell",
                     "am",
@@ -175,6 +184,8 @@ class AdbSmsTransport(SmsTransport):
             ],
             check=False,
         )
+        if message.index > self.last_processed_id:
+            self._save_last_processed_id(message.index)
 
     def _run_adb(self, args: list[str], check: bool = True) -> str:
         command = [self.adb_path, *self._serial_args(), *self._adb_args(args)]
@@ -197,6 +208,29 @@ class AdbSmsTransport(SmsTransport):
         if self.serial:
             return ["-s", self.serial]
         return []
+
+    def _load_last_processed_id(self) -> int:
+        try:
+            return int(self.state_file.read_text(encoding="utf-8").strip() or "0")
+        except FileNotFoundError:
+            return 0
+        except ValueError:
+            LOGGER.warning("Ignoring invalid ADB state file: %s", self.state_file)
+            return 0
+
+    def _save_last_processed_id(self, message_id: int) -> None:
+        self.state_file.write_text(f"{message_id}\n", encoding="utf-8")
+        self.last_processed_id = message_id
+
+    @classmethod
+    def _highest_message_id(cls, output: str) -> int:
+        highest = 0
+        for row in output.splitlines():
+            parsed = cls._parse_content_row(row)
+            message_id = parsed.get("_id")
+            if message_id:
+                highest = max(highest, int(message_id))
+        return highest
 
     @staticmethod
     def _adb_args(args: list[str]) -> list[str]:

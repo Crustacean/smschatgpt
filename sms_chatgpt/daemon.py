@@ -58,6 +58,8 @@ def _build_sms_transport(settings) -> SmsTransport:
             settings.adb_serial,
             settings.adb_send_mode,
             settings.adb_send_command_template,
+            settings.adb_state_file,
+            settings.adb_skip_existing,
         )
     raise ValueError(f"Unsupported SMS_BACKEND={settings.sms_backend!r}")
 

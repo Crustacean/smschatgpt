@@ -1,0 +1,9 @@
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+mock-inbox.txt
+mock-outbox.txt
+adb-sms-state.txt
+tests/

@@ -22,6 +22,8 @@ class Settings:
     adb_serial: str | None
     adb_send_mode: str
     adb_send_command_template: str | None
+    adb_state_file: str
+    adb_skip_existing: bool
     session_backend: str
     kubernetes_namespace: str
     chat_pod_image: str
@@ -47,6 +49,8 @@ def load_settings() -> Settings:
         adb_serial=os.getenv("ADB_SERIAL") or None,
         adb_send_mode=os.getenv("ADB_SEND_MODE", "compose").lower(),
         adb_send_command_template=os.getenv("ADB_SEND_COMMAND_TEMPLATE") or None,
+        adb_state_file=os.getenv("ADB_STATE_FILE", "./adb-sms-state.txt"),
+        adb_skip_existing=os.getenv("ADB_SKIP_EXISTING", "true").lower() in {"1", "true", "yes"},
         session_backend=os.getenv("SESSION_BACKEND", "kubernetes").lower(),
         kubernetes_namespace=os.getenv("KUBERNETES_NAMESPACE", "default"),
         chat_pod_image=os.getenv("CHAT_POD_IMAGE", "sms-chatgpt:latest"),
