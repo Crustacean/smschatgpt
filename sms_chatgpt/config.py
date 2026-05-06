@@ -29,6 +29,8 @@ class Settings:
     chat_pod_image: str
     chat_pod_idle_seconds: int
     chat_pod_timeout_seconds: int
+    chat_history_file: str
+    chat_history_max_turns: int
     llm_provider: str
     openai_api_key: str | None
     openai_model: str
@@ -56,6 +58,8 @@ def load_settings() -> Settings:
         chat_pod_image=os.getenv("CHAT_POD_IMAGE", "sms-chatgpt:latest"),
         chat_pod_idle_seconds=int(os.getenv("CHAT_POD_IDLE_SECONDS", "60")),
         chat_pod_timeout_seconds=int(os.getenv("CHAT_POD_TIMEOUT_SECONDS", "30")),
+        chat_history_file=os.getenv("CHAT_HISTORY_FILE", "/tmp/sms-chatgpt-history.json"),
+        chat_history_max_turns=int(os.getenv("CHAT_HISTORY_MAX_TURNS", "12")),
         llm_provider=os.getenv("LLM_PROVIDER", "openai").lower(),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),

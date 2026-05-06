@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from sms_chatgpt.k8s import ChatPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.sms import AdbSmsTransport
+from sms_chatgpt.worker import load_history, save_history, trim_history
 
 
 class ClampSmsReplyTest(unittest.TestCase):
@@ -52,6 +53,36 @@ class AdbSmsTransportTest(unittest.TestCase):
 class ChatPodManagerTest(unittest.TestCase):
     def test_worker_command_uses_module_entrypoint(self) -> None:
         self.assertEqual(ChatPodManager.worker_command, ["python", "-m", "sms_chatgpt.worker"])
+
+
+class WorkerHistoryTest(unittest.TestCase):
+    def test_save_and_load_history_round_trip(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            history_file = Path(temp_dir) / "history.json"
+            history = [
+                {"role": "user", "content": "my name is Ada"},
+                {"role": "assistant", "content": "Nice to meet you, Ada."},
+            ]
+
+            save_history(history_file, history, max_turns=12)
+
+            self.assertEqual(load_history(history_file, max_turns=12), history)
+
+    def test_trim_history_keeps_recent_turns(self) -> None:
+        history = [
+            {"role": "user", "content": "old user"},
+            {"role": "assistant", "content": "old assistant"},
+            {"role": "user", "content": "new user"},
+            {"role": "assistant", "content": "new assistant"},
+        ]
+
+        self.assertEqual(
+            trim_history(history, max_turns=1),
+            [
+                {"role": "user", "content": "new user"},
+                {"role": "assistant", "content": "new assistant"},
+            ],
+        )
 
 
 if __name__ == "__main__":

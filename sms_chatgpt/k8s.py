@@ -98,6 +98,8 @@ class ChatPodManager:
                             V1EnvVar(name="LLM_PROVIDER", value=self.settings.llm_provider),
                             V1EnvVar(name="OPENAI_API_KEY", value=self.settings.openai_api_key or ""),
                             V1EnvVar(name="OPENAI_MODEL", value=self.settings.openai_model),
+                            V1EnvVar(name="CHAT_HISTORY_FILE", value=self.settings.chat_history_file),
+                            V1EnvVar(name="CHAT_HISTORY_MAX_TURNS", value=str(self.settings.chat_history_max_turns)),
                         ],
                     )
                 ],

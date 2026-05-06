@@ -8,7 +8,7 @@
 2. The daemon polls unread SMS messages.
 3. For each sender, it creates or reuses a Kubernetes pod named `sms-chat-<hash>`.
 4. The daemon runs `python -m sms_chatgpt.worker --message ...` inside that pod.
-5. The worker calls the configured LLM and returns a <=140 character response.
+5. The worker loads that pod's conversation history, calls the configured LLM, saves the new turn, and returns a <=140 character response.
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
 
@@ -139,6 +139,8 @@ docker build -f Dockerfile -t sms-chatgpt-worker:latest .
 For a local cluster such as kind or minikube, load the image into the cluster or publish it to a registry and set `CHAT_POD_IMAGE`.
 
 The daemon needs permission to create, list, patch, exec into, and delete pods in `KUBERNETES_NAMESPACE`.
+
+Each per-sender pod stores conversation context in `CHAT_HISTORY_FILE` and keeps the most recent `CHAT_HISTORY_MAX_TURNS` user/assistant turns. That history lives only as long as the pod; increase `CHAT_POD_IDLE_SECONDS` if SMS follow-ups should keep context for longer than the default 60 seconds.
 
 Example minimal role:
 
