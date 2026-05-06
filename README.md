@@ -7,7 +7,7 @@
 1. A user sends an SMS to the USB-attached Android phone.
 2. The daemon polls unread SMS messages.
 3. For each sender, it creates or reuses a Kubernetes pod named `sms-chat-<hash>`.
-4. The daemon runs `sms-chatgpt-worker --message ...` inside that pod.
+4. The daemon runs `python -m sms_chatgpt.worker --message ...` inside that pod.
 5. The worker calls the configured LLM and returns a <=140 character response.
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
@@ -153,10 +153,26 @@ rules:
     verbs: ["create", "get", "list", "patch", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
 ```
 
 The manifests in `k8s/` deploy the daemon, RBAC, config, and namespace. The daemon deployment mounts `/dev/bus/usb` from the node, so the pod is privileged and scheduled only on nodes labeled `sms-chatgpt.usb-modem=true`.
+
+For minikube on a laptop, the host can see the phone even when the pod cannot safely claim USB directly. In that setup, run the ADB server on the host and let the pod connect to it:
+
+```bash
+adb kill-server
+adb -a start-server
+adb devices -l
+```
+
+The Kubernetes config uses:
+
+```yaml
+ADB_SERVER_SOCKET: "tcp:host.minikube.internal:5037"
+```
+
+Keep that ADB server running while the daemon pod is deployed.
 
 ## Jenkins Deployment
 

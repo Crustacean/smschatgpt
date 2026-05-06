@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from sms_chatgpt.k8s import ChatPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.sms import AdbSmsTransport
 
@@ -46,6 +47,11 @@ class AdbSmsTransportTest(unittest.TestCase):
             transport._save_last_processed_id(99)
 
             self.assertEqual(transport._load_last_processed_id(), 99)
+
+
+class ChatPodManagerTest(unittest.TestCase):
+    def test_worker_command_uses_module_entrypoint(self) -> None:
+        self.assertEqual(ChatPodManager.worker_command, ["python", "-m", "sms_chatgpt.worker"])
 
 
 if __name__ == "__main__":

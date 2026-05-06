@@ -4,9 +4,16 @@ import hashlib
 import logging
 import time
 
-from kubernetes import client, config, stream
-from kubernetes.client import V1Container, V1EnvVar, V1ObjectMeta, V1Pod, V1PodSpec
-from kubernetes.client.exceptions import ApiException
+try:
+    from kubernetes import client, config, stream
+    from kubernetes.client import V1Container, V1EnvVar, V1ObjectMeta, V1Pod, V1PodSpec
+    from kubernetes.client.exceptions import ApiException
+except ModuleNotFoundError:
+    client = config = stream = None
+    V1Container = V1EnvVar = V1ObjectMeta = V1Pod = V1PodSpec = None
+
+    class ApiException(Exception):
+        status = None
 
 from .config import Settings
 from .messages import clamp_sms_reply
@@ -15,7 +22,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ChatPodManager:
+    worker_command = ["python", "-m", "sms_chatgpt.worker"]
+
     def __init__(self, settings: Settings) -> None:
+        if client is None or config is None or stream is None:
+            raise RuntimeError("The kubernetes package is required when SESSION_BACKEND=kubernetes")
         self.settings = settings
         self.namespace = settings.kubernetes_namespace
         self.idle_seconds = settings.chat_pod_idle_seconds
@@ -28,11 +39,7 @@ class ChatPodManager:
         self._ensure_pod(pod_name, sender)
         self._wait_until_running(pod_name)
         self._mark_active(pod_name)
-        command = [
-            "sms-chatgpt-worker",
-            "--message",
-            message,
-        ]
+        command = [*self.worker_command, "--message", message]
         LOGGER.info("Executing chat worker in pod %s", pod_name)
         response = stream.stream(
             self.core.connect_get_namespaced_pod_exec,
