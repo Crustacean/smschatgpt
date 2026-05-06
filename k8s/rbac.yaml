@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: sms-chatgpt-daemon
-  namespace: sms-chatgpt
+  namespace: ${KUBE_NAMESPACE}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: sms-chatgpt-daemon
-  namespace: sms-chatgpt
+  namespace: ${KUBE_NAMESPACE}
 rules:
   - apiGroups: [""]
     resources: ["pods"]
@@ -21,11 +21,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: sms-chatgpt-daemon
-  namespace: sms-chatgpt
+  namespace: ${KUBE_NAMESPACE}
 subjects:
   - kind: ServiceAccount
     name: sms-chatgpt-daemon
-    namespace: sms-chatgpt
+    namespace: ${KUBE_NAMESPACE}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

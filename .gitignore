@@ -4,3 +4,4 @@ __pycache__/
 .env
 mock-inbox.txt
 mock-outbox.txt
+adb-sms-state.txt
