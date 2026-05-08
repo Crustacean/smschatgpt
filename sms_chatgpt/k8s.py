@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -19,7 +20,7 @@ except ModuleNotFoundError:
 from .config import Settings
 from .messages import clamp_sms_reply
 from .poll_manager import OutboundSms, PollResponse
-from .polls import ACTIVE, CLOSED, PENDING, contains_poll_intent, hash_msisdn, parse_creator_command
+from .polls import ACTIVE, CLOSED, PENDING, contains_poll_intent, hash_msisdn, match_vote_option, parse_creator_command
 
 LOGGER = logging.getLogger(__name__)
 
@@ -173,6 +174,8 @@ class PollPodManager:
             if sender_hash != state.get("creator_hash"):
                 if contains_poll_intent(body, self.settings.poll_keywords):
                     return PollResponse(True, "A poll is already pending.")
+                if match_vote_option(body, state.get("options") or []):
+                    return PollResponse(True, "Poll is not open yet.")
                 return PollResponse(False)
             command, _details = parse_creator_command(body)
             if command == "confirm":
@@ -273,10 +276,7 @@ class PollPodManager:
             tty=False,
             _request_timeout=self.timeout_seconds,
         )
-        try:
-            return json.loads(response or "{}")
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Poll worker returned non-JSON output: {response}") from exc
+        return self._parse_worker_response(response)
 
     def _status(self) -> dict:
         try:
@@ -320,6 +320,26 @@ class PollPodManager:
         except ApiException as exc:
             if exc.status != 404:
                 raise
+
+    @staticmethod
+    def _parse_worker_response(response: str) -> dict:
+        text = (response or "{}").strip()
+        candidates = [text]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(text[start : end + 1])
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except (SyntaxError, ValueError):
+                    continue
+            if isinstance(parsed, dict):
+                return parsed
+        raise RuntimeError(f"Poll worker returned unparseable output: {response}")
 
     def _wait_until_deleted(self) -> None:
         deadline = time.monotonic() + self.timeout_seconds

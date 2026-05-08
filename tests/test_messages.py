@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 
 from sms_chatgpt.config import Settings
 from sms_chatgpt.daemon import _send_poll_results
-from sms_chatgpt.k8s import ChatPodManager
+from sms_chatgpt.k8s import ChatPodManager, PollPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.poll_manager import LocalPollManager
 from sms_chatgpt.poll_worker import build_poll_llm, load_state, save_state
@@ -69,6 +69,11 @@ class AdbSmsTransportTest(unittest.TestCase):
 class ChatPodManagerTest(unittest.TestCase):
     def test_worker_command_uses_module_entrypoint(self) -> None:
         self.assertEqual(ChatPodManager.worker_command, ["python", "-m", "sms_chatgpt.worker"])
+
+    def test_poll_worker_response_parser_accepts_legacy_python_dict(self) -> None:
+        parsed = PollPodManager._parse_worker_response("{'exists': True, 'expired': False}")
+
+        self.assertEqual(parsed, {"exists": True, "expired": False})
 
 
 class WorkerHistoryTest(unittest.TestCase):
@@ -196,6 +201,7 @@ class LocalPollManagerTest(unittest.TestCase):
                 "+15550000001",
                 "Create a poll on funding a local well options: Yes, No for 60 seconds",
             )
+            early_vote = manager.handle_message("+15550000002", "Yes to fund for a well")
             started = manager.handle_message("+15550000001", "YES")
             vote = manager.handle_message("+15550000002", "Yes to fund for a well")
             duplicate = manager.handle_message("+15550000002", "2")
@@ -208,6 +214,7 @@ class LocalPollManagerTest(unittest.TestCase):
 
             self.assertTrue(draft.handled)
             self.assertIn("Poll draft", draft.reply or "")
+            self.assertEqual(early_vote.reply, "Poll is not open yet.")
             self.assertIn("Poll started", started.reply or "")
             self.assertEqual(vote.reply, "Vote recorded: Yes.")
             self.assertEqual(duplicate.reply, "Your vote has already been recorded.")

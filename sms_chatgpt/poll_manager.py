@@ -18,6 +18,7 @@ from .polls import (
     format_poll_draft,
     format_poll_started,
     hash_msisdn,
+    match_vote_option,
     merge_draft,
     parse_creator_command,
     record_vote,
@@ -63,6 +64,8 @@ class LocalPollManager:
             if sender_hash != state.creator_hash:
                 if contains_poll_intent(body, self.settings.poll_keywords):
                     return PollResponse(True, "A poll is already pending.")
+                if match_vote_option(body, state.options):
+                    return PollResponse(True, "Poll is not open yet.")
                 return PollResponse(False)
             command, details = parse_creator_command(body)
             if command == "confirm":
