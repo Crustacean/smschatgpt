@@ -139,16 +139,25 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(decision.option, "Yes")
 
     def test_classifies_short_yes_no_phrase_as_vote(self) -> None:
-        state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
+        state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on funding digging a well options: Yes, No for 60s")))
+        wall_state = confirm_poll(build_pending_poll("wall-creator", extract_draft_from_text("poll on building that wall options: Yes, No for 60s")))
 
-        yes_decision = classify_vote("Yes to fund for a well", state, "voter")
-        no_decision = classify_vote("No to funding the well", state, "another-voter")
+        yes_decision = classify_vote("Yes, fund the well", state, "voter")
+        support_decision = classify_vote("I am for funding for a well", state, "support-voter")
+        no_decision = classify_vote("do not fund for a well", state, "another-voter")
+        unrelated_decision = classify_vote("Yes build that wall", state, "wall-voter")
+        wall_decision = classify_vote("Yes build that wall", wall_state, "wall-voter")
         ask_decision = classify_vote("Yes what is photosynthesis?", state, "curious-voter")
 
         self.assertEqual(yes_decision.kind, "valid")
         self.assertEqual(yes_decision.option, "Yes")
+        self.assertEqual(support_decision.kind, "valid")
+        self.assertEqual(support_decision.option, "Yes")
         self.assertEqual(no_decision.kind, "valid")
         self.assertEqual(no_decision.option, "No")
+        self.assertEqual(unrelated_decision.kind, "ask")
+        self.assertEqual(wall_decision.kind, "valid")
+        self.assertEqual(wall_decision.option, "Yes")
         self.assertEqual(ask_decision.kind, "ask")
 
     def test_classifies_non_vote_as_ask(self) -> None:

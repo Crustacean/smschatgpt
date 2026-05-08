@@ -203,7 +203,11 @@ class PollPodManager:
         if vote_response.handled:
             return vote_response
 
-        if any(match_vote_option(body, (item.get("state") or {}).get("options") or []) for item in statuses if (item.get("state") or {}).get("status") == PENDING):
+        if any(
+            match_vote_option(body, (item.get("state") or {}).get("options") or [], (item.get("state") or {}).get("question"))
+            for item in statuses
+            if (item.get("state") or {}).get("status") == PENDING
+        ):
             return PollResponse(True, "Poll is not open yet.")
 
         return PollResponse(False)

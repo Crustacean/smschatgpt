@@ -88,7 +88,7 @@ class LocalPollManager:
         if vote_response.handled:
             return vote_response
 
-        if any(match_vote_option(body, state.options) for state in states.values() if state.status == PENDING):
+        if any(match_vote_option(body, state.options, state.question) for state in states.values() if state.status == PENDING):
             return PollResponse(True, "Poll is not open yet.")
 
         return PollResponse(False)

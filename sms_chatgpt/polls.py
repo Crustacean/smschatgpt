@@ -16,6 +16,33 @@ CANCEL_WORDS = {"cancel", "stop"}
 YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve"}
 NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject"}
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
+POSITIVE_VOTE_WORDS = {"support", "favor", "favour", "approve", "agree"}
+NEGATIVE_VOTE_WORDS = {"against", "oppose", "opposed", "reject"}
+CONTEXT_STOPWORDS = {
+    "a",
+    "about",
+    "am",
+    "an",
+    "and",
+    "are",
+    "be",
+    "by",
+    "do",
+    "for",
+    "i",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "poll",
+    "that",
+    "the",
+    "this",
+    "to",
+    "vote",
+    "we",
+}
 
 
 @dataclass
@@ -160,7 +187,7 @@ def confirm_poll(state: PollState, now: int | None = None) -> PollState:
 
 
 def classify_vote(message: str, state: PollState, voter_hash: str) -> VoteDecision:
-    option = match_vote_option(message, state.options)
+    option = match_vote_option(message, state.options, state.question)
     if option is None:
         if _looks_like_bad_vote(message):
             return VoteDecision("invalid", reply=_valid_vote_help(state.options))
@@ -172,7 +199,7 @@ def classify_vote(message: str, state: PollState, voter_hash: str) -> VoteDecisi
     return VoteDecision("valid", option=option, reply=f"Vote recorded: {option}.")
 
 
-def match_vote_option(message: str, options: list[str]) -> str | None:
+def match_vote_option(message: str, options: list[str], question: str | None = None) -> str | None:
     normalized = _normalize(message)
     if normalized.isdigit():
         index = int(normalized) - 1
@@ -186,7 +213,9 @@ def match_vote_option(message: str, options: list[str]) -> str | None:
         return yes_option
     if no_option and normalized in NO_WORDS:
         return no_option
-    phrase_vote = _leading_yes_no_phrase(message)
+    phrase_vote = _yes_no_vote_intent(message)
+    if phrase_vote and not _vote_context_matches(message, question):
+        return None
     if yes_option and phrase_vote == "yes":
         return yes_option
     if no_option and phrase_vote == "no":
@@ -323,7 +352,7 @@ def _looks_like_bad_vote(message: str) -> bool:
     return lowered.startswith(("vote ", "voting ", "poll vote "))
 
 
-def _leading_yes_no_phrase(message: str) -> str | None:
+def _yes_no_vote_intent(message: str) -> str | None:
     if "?" in message:
         return None
     words = re.findall(r"[a-zA-Z']+", message.lower())
@@ -335,7 +364,58 @@ def _leading_yes_no_phrase(message: str) -> str | None:
         return "yes"
     if words[0] in NO_WORDS:
         return "no"
+    normalized = _normalize(message)
+    if (
+        "do not" in normalized
+        or "don't" in normalized
+        or "dont" in normalized
+        or "not support" in normalized
+        or "not favor" in normalized
+        or "not favour" in normalized
+        or "not approve" in normalized
+        or "not agree" in normalized
+        or any(word in words for word in NEGATIVE_VOTE_WORDS)
+    ):
+        return "no"
+    if (
+        "i am for" in normalized
+        or "i'm for" in normalized
+        or normalized.startswith("for ")
+        or any(word in words for word in POSITIVE_VOTE_WORDS)
+    ):
+        return "yes"
     return None
+
+
+def _vote_context_matches(message: str, question: str | None) -> bool:
+    if not question:
+        return True
+    message_tokens = _context_tokens(message)
+    question_tokens = _context_tokens(question)
+    if not message_tokens:
+        return True
+    return bool(message_tokens & question_tokens)
+
+
+def _context_tokens(text: str) -> set[str]:
+    tokens = set()
+    for word in re.findall(r"[a-zA-Z]+", text.lower()):
+        token = _stem_context_word(word)
+        if token and token not in CONTEXT_STOPWORDS and token not in YES_WORDS and token not in NO_WORDS:
+            tokens.add(token)
+    return tokens
+
+
+def _stem_context_word(word: str) -> str:
+    if len(word) > 5 and word.endswith("ing"):
+        word = word[:-3]
+        if len(word) > 2 and word[-1] == word[-2]:
+            word = word[:-1]
+    elif len(word) > 4 and word.endswith("ed"):
+        word = word[:-2]
+    elif len(word) > 4 and word.endswith("s"):
+        word = word[:-1]
+    return word
 
 
 def _valid_vote_help(options: list[str]) -> str:
