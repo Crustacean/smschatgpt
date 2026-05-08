@@ -134,7 +134,7 @@ def deployToKubernetes() {
 
     withCredentials([string(credentialsId: env.OPENAI_API_KEY_CREDENTIALS, variable: 'OPENAI_API_KEY')]) {
         withKubeConfig(
-            caCertificate: env.KUBE_CA_CERT,
+            caCertificateId: env.KUBE_CA_CERT,
             clusterName: env.KUBE_CLUSTER,
             contextName: env.KUBE_CONTEXT,
             credentialsId: env.KUBE_CREDENTIALS,
