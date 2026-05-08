@@ -131,6 +131,19 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(decision.kind, "valid")
         self.assertEqual(decision.option, "Yes")
 
+    def test_classifies_short_yes_no_phrase_as_vote(self) -> None:
+        state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
+
+        yes_decision = classify_vote("Yes to fund for a well", state, "voter")
+        no_decision = classify_vote("No to funding the well", state, "another-voter")
+        ask_decision = classify_vote("Yes what is photosynthesis?", state, "curious-voter")
+
+        self.assertEqual(yes_decision.kind, "valid")
+        self.assertEqual(yes_decision.option, "Yes")
+        self.assertEqual(no_decision.kind, "valid")
+        self.assertEqual(no_decision.option, "No")
+        self.assertEqual(ask_decision.kind, "ask")
+
     def test_classifies_non_vote_as_ask(self) -> None:
         state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
 
@@ -182,7 +195,7 @@ class LocalPollManagerTest(unittest.TestCase):
                 "Create a poll on funding a local well options: Yes, No for 60 seconds",
             )
             started = manager.handle_message("+15550000001", "YES")
-            vote = manager.handle_message("+15550000002", "1")
+            vote = manager.handle_message("+15550000002", "Yes to fund for a well")
             duplicate = manager.handle_message("+15550000002", "2")
             creator_vote = manager.handle_message("+15550000001", "1")
             ask = manager.handle_message("+15550000003", "What is photosynthesis?")

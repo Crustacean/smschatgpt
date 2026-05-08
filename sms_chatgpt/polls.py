@@ -15,6 +15,7 @@ CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start"}
 CANCEL_WORDS = {"cancel", "stop"}
 YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve"}
 NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject"}
+QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
 
 
 @dataclass
@@ -182,6 +183,11 @@ def match_vote_option(message: str, options: list[str]) -> str | None:
         return yes_option
     if no_option and normalized in NO_WORDS:
         return no_option
+    phrase_vote = _leading_yes_no_phrase(message)
+    if yes_option and phrase_vote == "yes":
+        return yes_option
+    if no_option and phrase_vote == "no":
+        return no_option
     return None
 
 
@@ -311,6 +317,21 @@ def _yes_no_options(options: list[str]) -> tuple[str | None, str | None]:
 def _looks_like_bad_vote(message: str) -> bool:
     lowered = message.strip().lower()
     return lowered.startswith(("vote ", "voting ", "poll vote "))
+
+
+def _leading_yes_no_phrase(message: str) -> str | None:
+    if "?" in message:
+        return None
+    words = re.findall(r"[a-zA-Z']+", message.lower())
+    if not words or len(words) > 10:
+        return None
+    if len(words) > 1 and words[1] in QUESTION_WORDS:
+        return None
+    if words[0] in YES_WORDS:
+        return "yes"
+    if words[0] in NO_WORDS:
+        return "no"
+    return None
 
 
 def _valid_vote_help(options: list[str]) -> str:
