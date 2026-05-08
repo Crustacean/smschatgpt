@@ -6,7 +6,7 @@ from sms_chatgpt.config import Settings
 from sms_chatgpt.k8s import ChatPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.poll_manager import LocalPollManager
-from sms_chatgpt.poll_worker import load_state, save_state
+from sms_chatgpt.poll_worker import build_poll_llm, load_state, save_state
 from sms_chatgpt.polls import (
     build_pending_poll,
     classify_vote,
@@ -161,6 +161,14 @@ class PollsTest(unittest.TestCase):
         self.assertIn("No 1", summary)
         self.assertNotIn("hash-one", summary)
 
+    def test_poll_llm_falls_back_when_openai_is_not_configured(self) -> None:
+        llm = build_poll_llm("openai", None, "gpt-4o-mini")
+
+        self.assertIn(
+            "hello",
+            llm.complete([{"role": "user", "content": "hello"}]),
+        )
+
 
 class LocalPollManagerTest(unittest.TestCase):
     def test_poll_flow_and_chat_fallback(self) -> None:
@@ -195,6 +203,17 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertNotIn("+15550000001", state_text)
             self.assertNotIn("+15550000002", state_text)
 
+    def test_incomplete_poll_request_asks_for_missing_details_without_llm(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file, llm_provider="openai", openai_api_key=None)
+            manager = LocalPollManager(settings)
+
+            draft = manager.handle_message("+15550000001", "poll to fund digging of a well")
+
+            self.assertTrue(draft.handled)
+            self.assertIn("Poll needs options, duration", draft.reply or "")
+
     def test_expired_poll_sends_creator_result(self) -> None:
         with TemporaryDirectory() as temp_dir:
             state_file = Path(temp_dir) / "poll.json"
@@ -221,7 +240,11 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertIn("Yes 1", outbound[0].body)
 
 
-def _settings(poll_state_file: Path) -> Settings:
+def _settings(
+    poll_state_file: Path,
+    llm_provider: str = "echo",
+    openai_api_key: str | None = None,
+) -> Settings:
     return Settings(
         sms_backend="mock",
         sms_serial_port="/dev/ttyUSB0",
@@ -247,8 +270,8 @@ def _settings(poll_state_file: Path) -> Settings:
         poll_state_file=str(poll_state_file),
         poll_pod_name="sms-poll-active",
         poll_hash_salt="test-salt",
-        llm_provider="echo",
-        openai_api_key=None,
+        llm_provider=llm_provider,
+        openai_api_key=openai_api_key,
         openai_model="gpt-4o-mini",
         mock_inbox_file="./mock-inbox.txt",
         mock_outbox_file="./mock-outbox.txt",

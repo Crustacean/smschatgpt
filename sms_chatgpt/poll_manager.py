@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
-from .llm import LlmClient, build_llm_client
+from .llm import LlmClient
 from .messages import clamp_sms_reply
-from .poll_worker import extract_draft, load_state, save_state, summarize_results
+from .poll_worker import build_poll_llm, extract_draft, load_state, save_state, summarize_results
 from .polls import (
     ACTIVE,
     PENDING,
@@ -39,7 +39,7 @@ class LocalPollManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.state_path = Path(settings.poll_state_file)
-        self.llm: LlmClient = build_llm_client(
+        self.llm: LlmClient = build_poll_llm(
             settings.llm_provider,
             settings.openai_api_key,
             settings.openai_model,

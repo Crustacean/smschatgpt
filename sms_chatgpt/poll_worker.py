@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import load_settings
-from .llm import LlmClient, build_llm_client
+from .llm import EchoLlmClient, LlmClient, build_llm_client
 from .messages import clamp_sms_reply
 from .polls import (
     ACTIVE,
@@ -50,7 +50,7 @@ def main() -> None:
     args = parser.parse_args()
     settings = load_settings()
     state_path = Path(settings.poll_state_file)
-    llm = build_llm_client(settings.llm_provider, settings.openai_api_key, settings.openai_model)
+    llm = build_poll_llm(settings.llm_provider, settings.openai_api_key, settings.openai_model)
 
     if args.action == "draft":
         result = draft_poll(state_path, args.creator_hash, args.message, llm)
@@ -70,6 +70,13 @@ def main() -> None:
         raise RuntimeError(f"Unsupported poll action: {args.action}")
 
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
+
+
+def build_poll_llm(provider: str, api_key: str | None, model: str) -> LlmClient:
+    try:
+        return build_llm_client(provider, api_key, model)
+    except Exception:
+        return EchoLlmClient()
 
 
 def draft_poll(path: Path, creator_hash: str, message: str, llm: LlmClient) -> dict[str, Any]:

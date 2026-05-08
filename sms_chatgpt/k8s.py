@@ -207,8 +207,12 @@ class PollPodManager:
 
     def _ensure_pod(self, creator_phone: str) -> None:
         try:
-            self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
-            return
+            existing = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            if existing.metadata.deletion_timestamp or existing.status.phase in {"Failed", "Succeeded"}:
+                self._delete_pod()
+                self._wait_until_deleted()
+            else:
+                return
         except ApiException as exc:
             if exc.status != 404:
                 raise
@@ -262,15 +266,23 @@ class PollPodManager:
             tty=False,
             _request_timeout=self.timeout_seconds,
         )
-        return json.loads(response or "{}")
+        try:
+            return json.loads(response or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Poll worker returned non-JSON output: {response}") from exc
 
     def _status(self) -> dict:
         try:
-            self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            pod = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
         except ApiException as exc:
             if exc.status == 404:
                 return {"exists": False}
             raise
+        if pod.metadata.deletion_timestamp or pod.status.phase in {"Failed", "Succeeded"}:
+            LOGGER.info("Removing inactive poll pod %s in phase %s", self.settings.poll_pod_name, pod.status.phase)
+            self._delete_pod()
+            self._wait_until_deleted()
+            return {"exists": False}
         try:
             return self._exec("status")
         except Exception:
@@ -301,6 +313,18 @@ class PollPodManager:
         except ApiException as exc:
             if exc.status != 404:
                 raise
+
+    def _wait_until_deleted(self) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            time.sleep(1)
+        raise TimeoutError(f"Timed out waiting for pod {self.settings.poll_pod_name} to delete")
 
     @staticmethod
     def _load_kube_config() -> None:
