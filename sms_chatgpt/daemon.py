@@ -99,8 +99,12 @@ def _build_poll_manager(settings):
 def _send_poll_results(poll_manager, sms: SmsTransport) -> None:
     if not poll_manager:
         return
-    for outbound in poll_manager.close_expired():
+    outbound_messages = poll_manager.close_expired()
+    if not outbound_messages:
+        return
+    for outbound in outbound_messages:
         sms.send_sms(outbound.recipient, clamp_sms_reply(outbound.body))
+    poll_manager.ack_results_sent()
 
 
 class LocalChatManager:

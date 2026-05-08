@@ -147,8 +147,11 @@ def finalize_poll(path: Path, llm: LlmClient) -> dict[str, Any]:
     state = load_state(path)
     if not state:
         return {"handled": False}
+    if state.status == CLOSED and state.result_reply:
+        return {"handled": True, "reply": state.result_reply, "state": state.to_dict()}
     summary = summarize_results(state, llm)
     state.status = CLOSED
+    state.result_reply = summary
     save_state(path, state)
     return {"handled": True, "reply": summary, "state": state.to_dict()}
 

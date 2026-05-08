@@ -9,6 +9,7 @@ from .messages import clamp_sms_reply
 from .poll_worker import build_poll_llm, extract_draft, load_state, save_state, summarize_results
 from .polls import (
     ACTIVE,
+    CLOSED,
     PENDING,
     build_pending_poll,
     classify_vote,
@@ -98,12 +99,22 @@ class LocalPollManager:
 
     def close_expired(self) -> list[OutboundSms]:
         state = load_state(self.state_path)
-        if not state or not state.is_expired() or not self.creator_phone:
+        if not state or not self.creator_phone:
             return []
-        reply = summarize_results(state, self.llm)
-        recipient = self.creator_phone
+        if state.status == CLOSED and state.result_reply:
+            return [OutboundSms(self.creator_phone, clamp_sms_reply(state.result_reply))]
+        if not state.is_expired():
+            return []
+        state.status = CLOSED
+        state.result_reply = summarize_results(state, self.llm)
+        save_state(self.state_path, state)
+        return [OutboundSms(self.creator_phone, clamp_sms_reply(state.result_reply))]
+
+    def ack_results_sent(self) -> None:
+        state = load_state(self.state_path)
+        if not state or state.status != CLOSED:
+            return
         self._delete_state()
-        return [OutboundSms(recipient, clamp_sms_reply(reply))]
 
     def _delete_state(self) -> None:
         try:

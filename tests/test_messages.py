@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sms_chatgpt.config import Settings
+from sms_chatgpt.daemon import _send_poll_results
 from sms_chatgpt.k8s import ChatPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.poll_manager import LocalPollManager
@@ -12,6 +13,7 @@ from sms_chatgpt.polls import (
     classify_vote,
     confirm_poll,
     contains_poll_intent,
+    CLOSED,
     extract_draft_from_text,
     format_counts,
     hash_msisdn,
@@ -251,6 +253,46 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertEqual(late_vote.reply, "This poll is closed.")
             self.assertEqual(outbound[0].recipient, "+15550000001")
             self.assertIn("Yes 1", outbound[0].body)
+            finalized_state = load_state(state_file)
+            self.assertIsNotNone(finalized_state)
+            self.assertEqual(finalized_state.status, CLOSED)
+            self.assertIsNotNone(finalized_state.result_reply)
+            manager.ack_results_sent()
+            self.assertIsNone(load_state(state_file))
+
+    def test_daemon_deletes_poll_state_only_after_result_sms_send(self) -> None:
+        manager = _FakePollManager()
+        sms = _FakeSmsTransport()
+
+        _send_poll_results(manager, sms)
+
+        self.assertEqual(sms.sent, [("+15550000001", "Poll closed: Yes 1, No 0.")])
+        self.assertTrue(manager.acked)
+
+
+class _FakePollManager:
+    def __init__(self) -> None:
+        self.acked = False
+
+    def close_expired(self):
+        return [_FakeOutbound("+15550000001", "Poll closed: Yes 1, No 0.")]
+
+    def ack_results_sent(self) -> None:
+        self.acked = True
+
+
+class _FakeOutbound:
+    def __init__(self, recipient: str, body: str) -> None:
+        self.recipient = recipient
+        self.body = body
+
+
+class _FakeSmsTransport:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    def send_sms(self, recipient: str, body: str) -> None:
+        self.sent.append((recipient, body))
 
 
 def _settings(

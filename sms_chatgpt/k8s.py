@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 from .config import Settings
 from .messages import clamp_sms_reply
 from .poll_manager import OutboundSms, PollResponse
-from .polls import ACTIVE, PENDING, contains_poll_intent, hash_msisdn, parse_creator_command
+from .polls import ACTIVE, CLOSED, PENDING, contains_poll_intent, hash_msisdn, parse_creator_command
 
 LOGGER = logging.getLogger(__name__)
 
@@ -196,14 +196,21 @@ class PollPodManager:
 
     def close_expired(self) -> list[OutboundSms]:
         status = self._status()
-        if not status.get("exists") or not status.get("expired"):
+        if not status.get("exists"):
             return []
+        state = status.get("state") or {}
         creator = self._creator_phone()
+        if state.get("status") == CLOSED and state.get("result_reply") and creator:
+            return [OutboundSms(creator, clamp_sms_reply(state["result_reply"]))]
+        if not status.get("expired"):
+            return []
         result = self._exec("finalize")
-        self._delete_pod()
         if not creator or not result.get("reply"):
             return []
         return [OutboundSms(creator, clamp_sms_reply(result["reply"]))]
+
+    def ack_results_sent(self) -> None:
+        self._delete_pod()
 
     def _ensure_pod(self, creator_phone: str) -> None:
         try:

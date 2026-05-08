@@ -47,6 +47,7 @@ class PollState:
     start_time: int | None = None
     expires_at: int | None = None
     votes: dict[str, str] = field(default_factory=dict)
+    result_reply: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PollState":
@@ -62,6 +63,7 @@ class PollState:
             start_time=int(data["start_time"]) if data.get("start_time") is not None else None,
             expires_at=int(data["expires_at"]) if data.get("expires_at") is not None else None,
             votes={str(key): str(value) for key, value in data.get("votes", {}).items()},
+            result_reply=str(data["result_reply"]) if data.get("result_reply") is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -125,6 +127,7 @@ def merge_draft(current: PollState, draft: PollDraft) -> PollState:
         start_time=current.start_time,
         expires_at=current.expires_at,
         votes=current.votes,
+        result_reply=current.result_reply,
     )
 
 
@@ -204,6 +207,7 @@ def record_vote(state: PollState, voter_hash: str, option: str) -> PollState:
         start_time=state.start_time,
         expires_at=state.expires_at,
         votes=votes,
+        result_reply=state.result_reply,
     )
 
 
