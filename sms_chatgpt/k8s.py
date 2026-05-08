@@ -20,7 +20,17 @@ except ModuleNotFoundError:
 from .config import Settings
 from .messages import clamp_sms_reply
 from .poll_manager import OutboundSms, PollResponse
-from .polls import ACTIVE, CLOSED, PENDING, contains_poll_intent, hash_msisdn, match_vote_option, parse_creator_command
+from .polls import (
+    ACTIVE,
+    CLOSED,
+    PENDING,
+    PollState,
+    classify_vote,
+    contains_poll_intent,
+    hash_msisdn,
+    match_vote_option,
+    parse_creator_command,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,6 +158,8 @@ class ChatPodManager:
 class PollPodManager:
     worker_command = ["python", "-m", "sms_chatgpt.poll_worker"]
     creator_annotation = "sms-chatgpt/creator-msisdn"
+    creator_hash_annotation = "sms-chatgpt/creator-hash"
+    label_selector = "app=sms-chatgpt-poll,managed-by=sms-chatgpt-daemon"
 
     def __init__(self, settings: Settings) -> None:
         if client is None or config is None or stream is None:
@@ -160,67 +172,69 @@ class PollPodManager:
 
     def handle_message(self, sender: str, body: str) -> PollResponse:
         sender_hash = hash_msisdn(sender, self.settings.poll_hash_salt)
-        status = self._status()
-        state = status.get("state")
+        statuses = self._statuses()
+        own = self._own_status(statuses, sender_hash)
 
-        if not status.get("exists"):
-            if not contains_poll_intent(body, self.settings.poll_keywords):
-                return PollResponse(False)
-            self._ensure_pod(sender)
-            result = self._exec("draft", "--creator-hash", sender_hash, "--message", body)
+        if contains_poll_intent(body, self.settings.poll_keywords):
+            if own and (own.get("state") or {}).get("status") in {PENDING, ACTIVE, CLOSED}:
+                return PollResponse(True, "You have an ongoing poll.")
+            pod_name = self._pod_name(sender_hash)
+            self._ensure_pod(pod_name, sender, sender_hash)
+            result = self._exec(pod_name, "draft", "--creator-hash", sender_hash, "--message", body)
             return PollResponse(True, result.get("reply"))
 
-        if state and state.get("status") == PENDING:
-            if sender_hash != state.get("creator_hash"):
-                if contains_poll_intent(body, self.settings.poll_keywords):
-                    return PollResponse(True, "A poll is already pending.")
-                if match_vote_option(body, state.get("options") or []):
-                    return PollResponse(True, "Poll is not open yet.")
-                return PollResponse(False)
+        if own and (own.get("state") or {}).get("status") == PENDING:
             command, _details = parse_creator_command(body)
             if command == "confirm":
-                result = self._exec("confirm")
+                result = self._exec(own["pod_name"], "confirm")
             elif command == "cancel":
-                result = self._exec("cancel")
-                self._delete_pod()
+                result = self._exec(own["pod_name"], "cancel")
+                self._delete_pod(own["pod_name"])
+            elif body.strip().lower().startswith("amend "):
+                result = self._exec(own["pod_name"], "amend", "--message", body)
             else:
-                result = self._exec("amend", "--message", body)
+                vote_response = self._handle_vote(sender_hash, body, statuses)
+                if vote_response.handled:
+                    return vote_response
+                result = self._exec(own["pod_name"], "amend", "--message", body)
             return PollResponse(bool(result.get("handled", True)), result.get("reply"))
 
-        if state and state.get("status") == ACTIVE:
-            result = self._exec("vote", "--voter-hash", sender_hash, "--message", body)
-            if result.get("route_to_chat"):
-                if contains_poll_intent(body, self.settings.poll_keywords):
-                    return PollResponse(True, "A poll is already active.")
-                return PollResponse(False)
-            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+        vote_response = self._handle_vote(sender_hash, body, statuses)
+        if vote_response.handled:
+            return vote_response
+
+        if any(match_vote_option(body, (item.get("state") or {}).get("options") or []) for item in statuses if (item.get("state") or {}).get("status") == PENDING):
+            return PollResponse(True, "Poll is not open yet.")
 
         return PollResponse(False)
 
     def close_expired(self) -> list[OutboundSms]:
-        status = self._status()
-        if not status.get("exists"):
-            return []
-        state = status.get("state") or {}
-        creator = self._creator_phone()
-        if state.get("status") == CLOSED and state.get("result_reply") and creator:
-            return [OutboundSms(creator, clamp_sms_reply(state["result_reply"]))]
-        if not status.get("expired"):
-            return []
-        result = self._exec("finalize")
-        if not creator or not result.get("reply"):
-            return []
-        return [OutboundSms(creator, clamp_sms_reply(result["reply"]))]
+        outbound: list[OutboundSms] = []
+        for status in self._statuses():
+            state = status.get("state") or {}
+            creator = status.get("creator_phone")
+            pod_name = status["pod_name"]
+            if state.get("status") == CLOSED and state.get("result_reply") and creator:
+                outbound.append(OutboundSms(creator, clamp_sms_reply(state["result_reply"]), pod_name))
+                continue
+            if not status.get("expired"):
+                continue
+            result = self._exec(pod_name, "finalize")
+            if creator and result.get("reply"):
+                outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"]), pod_name))
+        return outbound
 
-    def ack_results_sent(self) -> None:
-        self._delete_pod()
+    def ack_results_sent(self, outbound_messages: list[OutboundSms] | None = None) -> None:
+        for outbound in outbound_messages or []:
+            if outbound.poll_id:
+                self._delete_pod(outbound.poll_id)
 
-    def _ensure_pod(self, creator_phone: str) -> None:
+    def _ensure_pod(self, pod_name: str, creator_phone: str, creator_hash: str) -> None:
         try:
-            existing = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            existing = self.core.read_namespaced_pod(pod_name, self.namespace)
             if existing.metadata.deletion_timestamp or existing.status.phase in {"Failed", "Succeeded"}:
-                self._delete_pod()
-                self._wait_until_deleted()
+                self._delete_pod(pod_name)
+                self._wait_until_deleted(pod_name)
             else:
                 return
         except ApiException as exc:
@@ -229,13 +243,15 @@ class PollPodManager:
 
         pod = V1Pod(
             metadata=V1ObjectMeta(
-                name=self.settings.poll_pod_name,
+                name=pod_name,
                 labels={
                     "app": "sms-chatgpt-poll",
                     "managed-by": "sms-chatgpt-daemon",
+                    "creator": creator_hash[:16],
                 },
                 annotations={
                     self.creator_annotation: creator_phone,
+                    self.creator_hash_annotation: creator_hash,
                     "sms-chatgpt/last-active": str(int(time.time())),
                 },
             ),
@@ -257,17 +273,17 @@ class PollPodManager:
                 ],
             ),
         )
-        LOGGER.info("Creating poll pod %s", self.settings.poll_pod_name)
+        LOGGER.info("Creating poll pod %s", pod_name)
         self.core.create_namespaced_pod(self.namespace, pod)
-        self._wait_until_running()
+        self._wait_until_running(pod_name)
 
-    def _exec(self, *args: str) -> dict:
-        self._wait_until_running()
+    def _exec(self, pod_name: str, *args: str) -> dict:
+        self._wait_until_running(pod_name)
         command = [*self.worker_command, *args]
         LOGGER.info("Executing poll worker action %s", args[0] if args else "")
         response = stream.stream(
             self.core.connect_get_namespaced_pod_exec,
-            self.settings.poll_pod_name,
+            pod_name,
             self.namespace,
             command=command,
             stderr=True,
@@ -278,48 +294,95 @@ class PollPodManager:
         )
         return self._parse_worker_response(response)
 
-    def _status(self) -> dict:
+    def _statuses(self) -> list[dict]:
+        pods = self.core.list_namespaced_pod(namespace=self.namespace, label_selector=self.label_selector)
+        statuses: list[dict] = []
+        for pod in pods.items:
+            status = self._status(pod.metadata.name)
+            if status.get("exists"):
+                status["pod_name"] = pod.metadata.name
+                status["creator_phone"] = (pod.metadata.annotations or {}).get(self.creator_annotation)
+                status["creator_hash"] = (pod.metadata.annotations or {}).get(self.creator_hash_annotation)
+                statuses.append(status)
+        return statuses
+
+    def _status(self, pod_name: str) -> dict:
         try:
-            pod = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            pod = self.core.read_namespaced_pod(pod_name, self.namespace)
         except ApiException as exc:
             if exc.status == 404:
                 return {"exists": False}
             raise
         if pod.metadata.deletion_timestamp or pod.status.phase in {"Failed", "Succeeded"}:
-            LOGGER.info("Removing inactive poll pod %s in phase %s", self.settings.poll_pod_name, pod.status.phase)
-            self._delete_pod()
-            self._wait_until_deleted()
+            LOGGER.info("Removing inactive poll pod %s in phase %s", pod_name, pod.status.phase)
+            self._delete_pod(pod_name)
+            self._wait_until_deleted(pod_name)
             return {"exists": False}
         try:
-            return self._exec("status")
+            return self._exec(pod_name, "status")
         except Exception:
-            LOGGER.exception("Failed to read poll status")
+            LOGGER.exception("Failed to read poll status for %s", pod_name)
             return {"exists": True}
 
-    def _wait_until_running(self) -> None:
+    def _handle_vote(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
+        other_matches: list[tuple[dict, PollState, object]] = []
+        own_match = None
+        for status in statuses:
+            state_data = status.get("state") or {}
+            if state_data.get("status") != ACTIVE:
+                continue
+            state = PollState.from_dict(state_data)
+            decision = classify_vote(body, state, sender_hash)
+            if decision.kind == "ask":
+                continue
+            if state.creator_hash == sender_hash:
+                own_match = (status, state, decision)
+            else:
+                other_matches.append((status, state, decision))
+
+        if len(other_matches) > 1:
+            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+        if len(other_matches) == 1:
+            status, state, decision = other_matches[0]
+            if state.is_expired():
+                return PollResponse(True, "This poll is closed.")
+            result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
+            if result.get("route_to_chat"):
+                return PollResponse(False)
+            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+        if own_match:
+            return PollResponse(True, "Poll creators cannot vote in their own poll.")
+        return PollResponse(False)
+
+    @staticmethod
+    def _own_status(statuses: list[dict], creator_hash: str) -> dict | None:
+        for status in statuses:
+            state = status.get("state") or {}
+            if state.get("creator_hash") == creator_hash or status.get("creator_hash") == creator_hash:
+                return status
+        return None
+
+    def _wait_until_running(self, pod_name: str) -> None:
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
-            pod = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            pod = self.core.read_namespaced_pod(pod_name, self.namespace)
             if pod.status.phase == "Running":
                 return
             if pod.status.phase in {"Failed", "Succeeded"}:
-                raise RuntimeError(f"Pod {self.settings.poll_pod_name} ended before it could handle poll")
+                raise RuntimeError(f"Pod {pod_name} ended before it could handle poll")
             time.sleep(1)
-        raise TimeoutError(f"Timed out waiting for pod {self.settings.poll_pod_name} to run")
+        raise TimeoutError(f"Timed out waiting for pod {pod_name} to run")
 
-    def _creator_phone(self) -> str | None:
+    def _delete_pod(self, pod_name: str) -> None:
         try:
-            pod = self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
-        except ApiException:
-            return None
-        return (pod.metadata.annotations or {}).get(self.creator_annotation)
-
-    def _delete_pod(self) -> None:
-        try:
-            self.core.delete_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+            self.core.delete_namespaced_pod(pod_name, self.namespace)
         except ApiException as exc:
             if exc.status != 404:
                 raise
+
+    def _pod_name(self, creator_hash: str) -> str:
+        base = self.settings.poll_pod_name[:46].rstrip("-")
+        return f"{base}-{creator_hash[:16]}"
 
     @staticmethod
     def _parse_worker_response(response: str) -> dict:
@@ -341,17 +404,17 @@ class PollPodManager:
                 return parsed
         raise RuntimeError(f"Poll worker returned unparseable output: {response}")
 
-    def _wait_until_deleted(self) -> None:
+    def _wait_until_deleted(self, pod_name: str) -> None:
         deadline = time.monotonic() + self.timeout_seconds
         while time.monotonic() < deadline:
             try:
-                self.core.read_namespaced_pod(self.settings.poll_pod_name, self.namespace)
+                self.core.read_namespaced_pod(pod_name, self.namespace)
             except ApiException as exc:
                 if exc.status == 404:
                     return
                 raise
             time.sleep(1)
-        raise TimeoutError(f"Timed out waiting for pod {self.settings.poll_pod_name} to delete")
+        raise TimeoutError(f"Timed out waiting for pod {pod_name} to delete")
 
     @staticmethod
     def _load_kube_config() -> None:

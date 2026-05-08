@@ -207,10 +207,16 @@ class LocalPollManagerTest(unittest.TestCase):
             duplicate = manager.handle_message("+15550000002", "2")
             creator_vote = manager.handle_message("+15550000001", "1")
             ask = manager.handle_message("+15550000003", "What is photosynthesis?")
+            same_creator_second = manager.handle_message(
+                "+15550000001",
+                "Create another poll options: Tea, Coffee for 60 seconds",
+            )
             second_poll = manager.handle_message(
                 "+15550000004",
                 "Create another poll options: Tea, Coffee for 60 seconds",
             )
+            second_started = manager.handle_message("+15550000004", "YES")
+            creator_votes_other = manager.handle_message("+15550000001", "Tea")
 
             self.assertTrue(draft.handled)
             self.assertIn("Poll draft", draft.reply or "")
@@ -220,8 +226,11 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertEqual(duplicate.reply, "Your vote has already been recorded.")
             self.assertIn("creators cannot vote", creator_vote.reply or "")
             self.assertFalse(ask.handled)
-            self.assertEqual(second_poll.reply, "A poll is already active.")
-            state_text = state_file.read_text(encoding="utf-8")
+            self.assertEqual(same_creator_second.reply, "You have an ongoing poll.")
+            self.assertIn("Poll draft", second_poll.reply or "")
+            self.assertIn("Poll started", second_started.reply or "")
+            self.assertEqual(creator_votes_other.reply, "Vote recorded: Tea.")
+            state_text = _local_state_text(state_file)
             self.assertNotIn("+15550000001", state_text)
             self.assertNotIn("+15550000002", state_text)
 
@@ -247,10 +256,12 @@ class LocalPollManagerTest(unittest.TestCase):
             )
             manager.handle_message("+15550000001", "YES")
             manager.handle_message("+15550000002", "1")
-            state = load_state(state_file)
+            creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
+            state_path = manager._state_path(creator_hash)
+            state = load_state(state_path)
             self.assertIsNotNone(state)
             state.expires_at = 0
-            save_state(state_file, state)
+            save_state(state_path, state)
             late_ask = manager.handle_message("+15550000003", "What is photosynthesis?")
             late_vote = manager.handle_message("+15550000004", "1")
 
@@ -260,12 +271,26 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertEqual(late_vote.reply, "This poll is closed.")
             self.assertEqual(outbound[0].recipient, "+15550000001")
             self.assertIn("Yes 1", outbound[0].body)
-            finalized_state = load_state(state_file)
+            finalized_state = load_state(state_path)
             self.assertIsNotNone(finalized_state)
             self.assertEqual(finalized_state.status, CLOSED)
             self.assertIsNotNone(finalized_state.result_reply)
-            manager.ack_results_sent()
-            self.assertIsNone(load_state(state_file))
+            manager.ack_results_sent(outbound)
+            self.assertIsNone(load_state(state_path))
+
+    def test_ambiguous_vote_across_multiple_polls_is_not_counted(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+            manager.handle_message("+15550000001", "poll on a local well options: Yes, No for 60 seconds")
+            manager.handle_message("+15550000001", "YES")
+            manager.handle_message("+15550000002", "poll on a school roof options: Yes, No for 60 seconds")
+            manager.handle_message("+15550000002", "YES")
+
+            vote = manager.handle_message("+15550000003", "Yes")
+
+            self.assertEqual(vote.reply, "Multiple polls match. Reply with a clearer vote.")
 
     def test_daemon_deletes_poll_state_only_after_result_sms_send(self) -> None:
         manager = _FakePollManager()
@@ -284,7 +309,8 @@ class _FakePollManager:
     def close_expired(self):
         return [_FakeOutbound("+15550000001", "Poll closed: Yes 1, No 0.")]
 
-    def ack_results_sent(self) -> None:
+    def ack_results_sent(self, outbound_messages=None) -> None:
+        del outbound_messages
         self.acked = True
 
 
@@ -292,6 +318,7 @@ class _FakeOutbound:
     def __init__(self, recipient: str, body: str) -> None:
         self.recipient = recipient
         self.body = body
+        self.poll_id = "poll-one"
 
 
 class _FakeSmsTransport:
@@ -338,6 +365,11 @@ def _settings(
         mock_inbox_file="./mock-inbox.txt",
         mock_outbox_file="./mock-outbox.txt",
     )
+
+
+def _local_state_text(state_file: Path) -> str:
+    state_dir = state_file.with_name(f"{state_file.name}.d")
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(state_dir.glob("*.json")))
 
 
 if __name__ == "__main__":

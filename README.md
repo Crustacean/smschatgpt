@@ -28,9 +28,11 @@ The daemon creates a pending poll and replies with a draft. The creator can then
 - `AMEND <new wording/options/duration>` to revise it.
 - `CANCEL` to discard it.
 
-While a poll is active, any sender except the creator can vote once by replying with the option number, such as `1`, or the exact option text. The creator's vote is rejected, and duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match the active poll choices continue through the normal ChatGPT flow.
+Each creator MSISDN hash can have one ongoing poll at a time. If the same creator asks for another poll before their current poll closes, they receive `You have an ongoing poll.` Other MSISDNs can still create their own polls while responding to polls created by someone else.
 
-Poll state is stored in a dedicated poll pod named by `POLL_POD_NAME`. The state stores MSISDN hashes, not raw voter phone numbers. When the poll expires, the worker sends only anonymous aggregate counts to OpenAI for a <=140 character summary, sends that result to the creator, and deletes the poll pod.
+While a poll is active, any sender except that poll's creator can vote once by replying with the option number, such as `1`, or the exact option text. The creator's vote in their own poll is rejected, but they can vote in other active polls. Duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match exactly one active poll continue through the normal ChatGPT flow.
+
+Poll state is stored in dedicated poll pods named with the `POLL_POD_NAME` prefix and the creator hash prefix. The state stores MSISDN hashes, not raw voter phone numbers. When a poll expires, the worker sends only anonymous aggregate counts to OpenAI for a <=140 character summary, sends that result to the creator, and deletes that poll pod.
 
 ## Important Android/ADB Note
 

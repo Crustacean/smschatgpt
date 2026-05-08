@@ -104,7 +104,7 @@ def _send_poll_results(poll_manager, sms: SmsTransport) -> None:
         return
     for outbound in outbound_messages:
         sms.send_sms(outbound.recipient, clamp_sms_reply(outbound.body))
-    poll_manager.ack_results_sent()
+    poll_manager.ack_results_sent(outbound_messages)
 
 
 class LocalChatManager:
