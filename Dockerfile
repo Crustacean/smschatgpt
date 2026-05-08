@@ -8,6 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN pip install --no-compile "openai>=1.40.0"
+RUN printf '#!/bin/sh\nexec python -m sms_chatgpt.worker "$@"\n' > /usr/local/bin/sms-chatgpt-worker \
+    && chmod +x /usr/local/bin/sms-chatgpt-worker
 
 COPY sms_chatgpt/__init__.py \
      sms_chatgpt/config.py \

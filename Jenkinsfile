@@ -11,23 +11,7 @@ pipeline {
         DOCKER_CREDENTIALS = 'docker-hub-credentials'
         OPENAI_API_KEY_CREDENTIALS = 'openai-api-key'
 
-        KUBE_CA_CERT = '''MIIDBjCCAe6gAwIBAgIBATANBgkqhkiG9w0BAQsFADAVMRMwEQYDVQQDEwptaW5p
-a3ViZUNBMB4XDTI2MDQyNDExNDkwOVoXDTM2MDQyMjExNDkwOVowFTETMBEGA1UE
-AxMKbWluaWt1YmVDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJno
-8eiJ0FZapXZ40Fs5Oy2t9Y6hSwLQBFAHvuU3DiMeTBeL2iKYeKbnHYmaeD4IzzPK
-otHoOzN//UugSWl6Jg8lcvhhULBiZ/u70TEVpY0QCmoV2NdPYYWAAxHMSGPvNQIj
-WA05vWum4ge1iUKf34edrReu43mr0rD1lKVFpGy5zYdNqm9GCyM6kerbdO5ha/u5
-LNMR/jDTk9OArnjlxoEtNm1i30vd4zbet8X9atQcjWELLDzFBQoKa5yVwTjf0UzD
-ulABms3/ODeyKOMxSVaymzVOsqooHPrXfag8WBfx45kA3AvsrfxVdgyKiML2j39V
-YGTZVPBveNOG5GzyaYkCAwEAAaNhMF8wDgYDVR0PAQH/BAQDAgKkMB0GA1UdJQQW
-MBQGCCsGAQUFBwMCBggrBgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW
-BBTUhbcJY6pJxshLV7U1niJOsQbj2zANBgkqhkiG9w0BAQsFAAOCAQEAcODYINxv
-Digo62XfFCZWQBcm5iZiOWxU8wZ5uCi9TGCgZxEh0+GkaZkRv/PeBGzEqv/yIxFi
-6CJmpPSLGrc8TNF7/+7p3F0dBftpXKe7mWV/VG/GHaDKFqU8HJv4L3oyIS5+hi8L
-SCflgi/66BGNk2+AzXqDJiR/OWGz3lREHNsfOVdeE0YaAw3+ssaPdOEcNqSTST7M
-cwQum+Eu9dWnqhHrDuzII+YgytFYh5Rmwar84+S2N6cKn9/rfIt5R3xi0pLL2QUs
-+B2qL06zDdCBliAn9ohzxfnboQZPCtaimvSfFAwVyqWZfgN1VQ7IaJ/2gMUd121g
-1aPRKygslsNMNQ=='''
+        KUBE_CA_CERT = 'minikube-ca-cert'
         KUBE_CLUSTER = 'minikube'
         KUBE_CONTEXT = 'minikube'
         KUBE_CREDENTIALS = 'minikube-jenkins-secret'
@@ -150,7 +134,7 @@ def deployToKubernetes() {
 
     withCredentials([string(credentialsId: env.OPENAI_API_KEY_CREDENTIALS, variable: 'OPENAI_API_KEY')]) {
         withKubeConfig(
-            caCertificate: env.KUBE_CA_CERT,
+            caCertificateId: env.KUBE_CA_CERT,
             clusterName: env.KUBE_CLUSTER,
             contextName: env.KUBE_CONTEXT,
             credentialsId: env.KUBE_CREDENTIALS,

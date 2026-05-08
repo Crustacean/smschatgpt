@@ -74,7 +74,10 @@ class AdbSmsTransport(SmsTransport):
         self.state_file = Path(state_file)
         self.skip_existing = skip_existing
         self.last_processed_id = self._load_last_processed_id()
-        self._run_adb(["get-state"])
+        try:
+            self._run_adb(["get-state"])
+        except RuntimeError as exc:
+            LOGGER.warning("ADB is not ready during startup; will retry in the daemon loop: %s", exc)
 
     def receive_unread(self) -> list[SmsMessage]:
         output = self._run_adb(
