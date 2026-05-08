@@ -14,11 +14,29 @@ class LlmClient(abc.ABC):
     def respond(self, message: str, history: Sequence[ChatMessage] | None = None) -> str:
         """Return a short answer for an SMS chat."""
 
+    @abc.abstractmethod
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        max_tokens: int = 160,
+        temperature: float = 0.4,
+    ) -> str:
+        """Return raw model text for non-chat workflows."""
+
 
 class EchoLlmClient(LlmClient):
     def respond(self, message: str, history: Sequence[ChatMessage] | None = None) -> str:
         del history
         return clamp_sms_reply(f"Echo: {message}")
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        max_tokens: int = 160,
+        temperature: float = 0.4,
+    ) -> str:
+        del max_tokens, temperature
+        return messages[-1]["content"] if messages else ""
 
 
 class OpenAiLlmClient(LlmClient):
@@ -34,14 +52,21 @@ class OpenAiLlmClient(LlmClient):
         messages: list[ChatMessage] = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages.extend(_valid_history(history or []))
         messages.append({"role": "user", "content": message})
+        return clamp_sms_reply(self.complete(messages, max_tokens=80, temperature=0.4))
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        max_tokens: int = 160,
+        temperature: float = 0.4,
+    ) -> str:
         completion = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
-            max_tokens=80,
-            temperature=0.4,
+            messages=list(messages),
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
-        text = completion.choices[0].message.content or ""
-        return clamp_sms_reply(text)
+        return completion.choices[0].message.content or ""
 
 
 def build_llm_client(provider: str, api_key: str | None, model: str) -> LlmClient:

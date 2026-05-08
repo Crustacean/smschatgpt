@@ -31,6 +31,11 @@ class Settings:
     chat_pod_timeout_seconds: int
     chat_history_file: str
     chat_history_max_turns: int
+    poll_enabled: bool
+    poll_keywords: list[str]
+    poll_state_file: str
+    poll_pod_name: str
+    poll_hash_salt: str
     llm_provider: str
     openai_api_key: str | None
     openai_model: str
@@ -60,6 +65,15 @@ def load_settings() -> Settings:
         chat_pod_timeout_seconds=int(os.getenv("CHAT_POD_TIMEOUT_SECONDS", "30")),
         chat_history_file=os.getenv("CHAT_HISTORY_FILE", "/tmp/sms-chatgpt-history.json"),
         chat_history_max_turns=int(os.getenv("CHAT_HISTORY_MAX_TURNS", "12")),
+        poll_enabled=os.getenv("POLL_ENABLED", "true").lower() in {"1", "true", "yes"},
+        poll_keywords=[
+            keyword.strip().lower()
+            for keyword in os.getenv("POLL_KEYWORDS", "poll,vote,voting").split(",")
+            if keyword.strip()
+        ],
+        poll_state_file=os.getenv("POLL_STATE_FILE", "/tmp/sms-chatgpt-poll.json"),
+        poll_pod_name=os.getenv("POLL_POD_NAME", "sms-poll-active"),
+        poll_hash_salt=os.getenv("POLL_HASH_SALT", "dev-only-insecure-poll-salt"),
         llm_provider=os.getenv("LLM_PROVIDER", "openai").lower(),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),

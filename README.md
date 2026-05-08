@@ -12,6 +12,26 @@
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
 
+## SMS Polls
+
+When `POLL_ENABLED=true`, inbound messages containing keywords such as `poll`, `vote`, or `voting` start the poll flow instead of the normal chat flow.
+
+Example creator SMS:
+
+```text
+Create a Yes or No poll on funding to dig a local well for 60 seconds
+```
+
+The daemon creates a pending poll and replies with a draft. The creator can then reply:
+
+- `YES`, `CONFIRM`, `OK`, `APPROVE`, or `START` to open the poll.
+- `AMEND <new wording/options/duration>` to revise it.
+- `CANCEL` to discard it.
+
+While a poll is active, any sender except the creator can vote once by replying with the option number, such as `1`, or the exact option text. The creator's vote is rejected, and duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match the active poll choices continue through the normal ChatGPT flow.
+
+Poll state is stored in a dedicated poll pod named by `POLL_POD_NAME`. The state stores MSISDN hashes, not raw voter phone numbers. When the poll expires, the worker sends only anonymous aggregate counts to OpenAI for a <=140 character summary, sends that result to the creator, and deletes the poll pod.
+
 ## Important Android/ADB Note
 
 Android allows ADB shell access to the SMS content provider on some devices/builds, which lets the daemon read inbound SMS with:
@@ -142,6 +162,8 @@ The daemon needs permission to create, list, patch, exec into, and delete pods i
 
 Each per-sender pod stores conversation context in `CHAT_HISTORY_FILE` and keeps the most recent `CHAT_HISTORY_MAX_TURNS` user/assistant turns. That history lives only as long as the pod; increase `CHAT_POD_IDLE_SECONDS` if SMS follow-ups should keep context for longer than the default 60 seconds.
 
+Polls use the same worker image for a dedicated poll pod. Set `POLL_HASH_SALT` as a Kubernetes Secret so MSISDN hashes are stable but not reversible from repo configuration.
+
 Example minimal role:
 
 ```yaml
@@ -188,6 +210,7 @@ Before running the Jenkins job, update `IMAGE_REPOSITORY` in `Jenkinsfile`, then
 - `docker-registry-credentials`: username/password or token for your container registry.
 - `kubeconfig`: kubeconfig file for your cluster.
 - `openai-api-key`: secret text containing your OpenAI API key.
+- `poll-hash-salt`: secret text used to hash voter MSISDNs.
 
 ## AT Modem Alternative
 

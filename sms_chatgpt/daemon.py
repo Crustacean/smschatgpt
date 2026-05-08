@@ -23,20 +23,28 @@ def main() -> None:
     settings = load_settings()
     sms = _build_sms_transport(settings)
     chat_manager = _build_chat_manager(settings)
+    poll_manager = _build_poll_manager(settings)
 
     LOGGER.info("Starting SMS ChatGPT daemon with %s SMS backend", settings.sms_backend)
     while not SHOULD_STOP:
         try:
+            _send_poll_results(poll_manager, sms)
             for message in sms.receive_unread():
                 LOGGER.info("Received SMS from %s", message.sender)
                 try:
-                    reply = chat_manager.ask(message.sender, message.body)
+                    poll_response = poll_manager.handle_message(message.sender, message.body) if poll_manager else None
+                    if poll_response and poll_response.handled:
+                        reply = poll_response.reply or ""
+                    else:
+                        reply = chat_manager.ask(message.sender, message.body)
                 except Exception:
-                    LOGGER.exception("Chat session failed for sender %s", message.sender)
+                    LOGGER.exception("Message handling failed for sender %s", message.sender)
                     reply = "Sorry, I could not answer right now."
-                sms.send_sms(message.sender, clamp_sms_reply(reply))
+                if reply:
+                    sms.send_sms(message.sender, clamp_sms_reply(reply))
                 sms.ack(message)
             chat_manager.cleanup_idle_pods()
+            _send_poll_results(poll_manager, sms)
         except Exception:
             LOGGER.exception("Daemon loop failed")
         time.sleep(settings.sms_poll_seconds)
@@ -72,6 +80,27 @@ def _build_chat_manager(settings):
     if settings.session_backend == "local":
         return LocalChatManager(settings)
     raise ValueError(f"Unsupported SESSION_BACKEND={settings.session_backend!r}")
+
+
+def _build_poll_manager(settings):
+    if not settings.poll_enabled:
+        return None
+    if settings.session_backend == "kubernetes":
+        from .k8s import PollPodManager
+
+        return PollPodManager(settings)
+    if settings.session_backend == "local":
+        from .poll_manager import LocalPollManager
+
+        return LocalPollManager(settings)
+    return None
+
+
+def _send_poll_results(poll_manager, sms: SmsTransport) -> None:
+    if not poll_manager:
+        return
+    for outbound in poll_manager.close_expired():
+        sms.send_sms(outbound.recipient, clamp_sms_reply(outbound.body))
 
 
 class LocalChatManager:
