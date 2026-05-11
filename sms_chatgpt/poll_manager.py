@@ -17,13 +17,21 @@ from .polls import (
     confirm_poll,
     contains_poll_intent,
     format_amend_help,
-    format_pending_vote_context_request,
+    format_creator_cannot_vote,
+    format_duplicate_vote,
+    format_multiple_polls,
+    format_ongoing_poll,
+    format_pending_vote_context_request_for_language,
     format_pending_vote_expired,
     format_pending_vote_not_matched,
+    format_poll_canceled,
+    format_poll_closed,
     format_poll_draft,
+    format_poll_not_open,
     format_poll_started,
     is_contextless_vote,
     hash_msisdn,
+    language_for_states,
     match_vote_option,
     merge_draft,
     parse_creator_command,
@@ -49,6 +57,7 @@ class OutboundSms:
 class PendingVote:
     message: str
     poll_ids: tuple[str, ...]
+    language: str = "en"
 
 
 class LocalPollManager:
@@ -70,7 +79,7 @@ class LocalPollManager:
 
         if contains_poll_intent(body, self.settings.poll_keywords):
             if own and own.status in {PENDING, ACTIVE, CLOSED}:
-                return PollResponse(True, "You have an ongoing poll.")
+                return PollResponse(True, format_ongoing_poll(own.language))
             draft = extract_draft(body, self.llm)
             state = build_pending_poll(sender_hash, draft)
             save_state(self._state_path(sender_hash), state)
@@ -87,7 +96,7 @@ class LocalPollManager:
                 return PollResponse(True, format_poll_started(own))
             if command == "cancel":
                 self._delete_state(sender_hash)
-                return PollResponse(True, "Poll canceled.")
+                return PollResponse(True, format_poll_canceled(own.language))
             if command == "amend" and not details:
                 return PollResponse(True, format_amend_help(own))
             if not body.strip().lower().startswith("amend"):
@@ -107,8 +116,13 @@ class LocalPollManager:
         if vote_response.handled:
             return vote_response
 
-        if any(match_vote_option(body, state.options, state.question) for state in states.values() if state.status == PENDING):
-            return PollResponse(True, "Poll is not open yet.")
+        pending_matches = [
+            state
+            for state in states.values()
+            if state.status == PENDING and match_vote_option(body, state.options, state.question)
+        ]
+        if pending_matches:
+            return PollResponse(True, format_poll_not_open(language_for_states(pending_matches)))
 
         return PollResponse(False)
 
@@ -148,12 +162,13 @@ class LocalPollManager:
                 if creator_hash != sender_hash and not state.is_expired() and sender_hash not in state.votes
             }
             if eligible:
-                self.pending_votes[sender_hash] = PendingVote(body, tuple(eligible))
-                return PollResponse(True, format_pending_vote_context_request())
+                language = language_for_states(list(eligible.values()))
+                self.pending_votes[sender_hash] = PendingVote(body, tuple(eligible), language)
+                return PollResponse(True, format_pending_vote_context_request_for_language(language))
             if any(creator_hash == sender_hash for creator_hash in active_states):
-                return PollResponse(True, "Poll creators cannot vote in their own poll.")
+                return PollResponse(True, format_creator_cannot_vote(language_for_states(list(active_states.values()))))
             if any(sender_hash in state.votes for state in active_states.values()):
-                return PollResponse(True, "Your vote has already been recorded.")
+                return PollResponse(True, format_duplicate_vote(language_for_states(list(active_states.values()))))
 
         other_matches: list[tuple[str, object, object]] = []
         own_match = None
@@ -167,18 +182,18 @@ class LocalPollManager:
                 other_matches.append((creator_hash, state, decision))
 
         if len(other_matches) > 1:
-            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in other_matches])))
         if len(other_matches) == 1:
             creator_hash, state, decision = other_matches[0]
             if state.is_expired():
-                return PollResponse(True, "This poll is closed.")
+                return PollResponse(True, format_poll_closed(state.language))
             if decision.kind == "invalid":
                 return PollResponse(True, decision.reply)
             state = record_vote(state, sender_hash, decision.option or "")
             save_state(self._state_path(creator_hash), state)
             return PollResponse(True, decision.reply)
         if own_match:
-            return PollResponse(True, "Poll creators cannot vote in their own poll.")
+            return PollResponse(True, format_creator_cannot_vote(own_match[1].language))
         return PollResponse(False)
 
     def _handle_pending_vote_context(
@@ -201,10 +216,11 @@ class LocalPollManager:
         }
         if not active_candidates:
             self.pending_votes.pop(sender_hash, None)
-            return PollResponse(True, format_pending_vote_expired())
+            return PollResponse(True, format_pending_vote_expired(pending.language))
         if is_contextless_vote(body):
-            self.pending_votes[sender_hash] = PendingVote(body, tuple(active_candidates))
-            return PollResponse(True, format_pending_vote_context_request())
+            language = language_for_states(list(active_candidates.values()))
+            self.pending_votes[sender_hash] = PendingVote(body, tuple(active_candidates), language)
+            return PollResponse(True, format_pending_vote_context_request_for_language(language))
 
         matches: list[tuple[str, PollState, object]] = []
         for creator_hash, state in active_candidates.items():
@@ -213,7 +229,7 @@ class LocalPollManager:
                 matches.append((creator_hash, state, decision))
 
         if len(matches) > 1:
-            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in matches])))
         if len(matches) == 1:
             creator_hash, state, decision = matches[0]
             if decision.kind == "invalid":
@@ -223,7 +239,7 @@ class LocalPollManager:
             save_state(self._state_path(creator_hash), state)
             self.pending_votes.pop(sender_hash, None)
             return PollResponse(True, decision.reply)
-        return PollResponse(True, format_pending_vote_not_matched())
+        return PollResponse(True, format_pending_vote_not_matched(language_for_states(list(active_candidates.values()))))
 
     def _discard_closed_pending_votes(self) -> None:
         states = self._load_states()

@@ -12,12 +12,14 @@ from .messages import clamp_sms_reply
 PENDING = "pending"
 ACTIVE = "active"
 CLOSED = "closed"
-CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start"}
-CANCEL_WORDS = {"cancel", "stop"}
-YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve", "ndio", "naam"}
+DEFAULT_LANGUAGE = "en"
+SWAHILI = "sw"
+CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start", "ndio", "ndiyo", "naam"}
+CANCEL_WORDS = {"cancel", "stop", "ghairi"}
+YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve", "ndio", "ndiyo", "naam"}
 NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject", "hapana", "la"}
 MAYBE_WORDS = {"maybe", "perhaps", "unsure", "not sure", "labda"}
-YES_OPTION_LABELS = {"yes", "y", "ndio", "naam"}
+YES_OPTION_LABELS = {"yes", "y", "ndio", "ndiyo", "naam"}
 NO_OPTION_LABELS = {"no", "n", "hapana", "la"}
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
 POSITIVE_VOTE_WORDS = {"support", "favor", "favour", "approve", "agree", "unga"}
@@ -80,6 +82,29 @@ CONTEXT_STOPWORDS = {
     "ya",
     "za",
 }
+SWAHILI_MARKERS = {
+    "anzisha",
+    "au",
+    "chaguo",
+    "dakika",
+    "ghairi",
+    "hapana",
+    "jenga",
+    "kujenga",
+    "kura",
+    "kwa",
+    "kuhusu",
+    "maktaba",
+    "maoni",
+    "muda",
+    "ndio",
+    "ndiyo",
+    "sekunde",
+    "shule",
+    "sio",
+    "tafadhali",
+    "tengeneza",
+}
 
 
 @dataclass
@@ -87,6 +112,7 @@ class PollDraft:
     question: str = ""
     options: list[str] = field(default_factory=list)
     duration_seconds: int | None = None
+    language: str = DEFAULT_LANGUAGE
 
     @property
     def missing(self) -> list[str]:
@@ -112,6 +138,7 @@ class PollState:
     expires_at: int | None = None
     votes: dict[str, str] = field(default_factory=dict)
     result_reply: str | None = None
+    language: str = DEFAULT_LANGUAGE
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PollState":
@@ -128,6 +155,7 @@ class PollState:
             expires_at=int(data["expires_at"]) if data.get("expires_at") is not None else None,
             votes={str(key): str(value) for key, value in data.get("votes", {}).items()},
             result_reply=str(data["result_reply"]) if data.get("result_reply") is not None else None,
+            language=_normalize_language(str(data.get("language", DEFAULT_LANGUAGE))),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,7 +163,7 @@ class PollState:
 
     @property
     def missing(self) -> list[str]:
-        return PollDraft(self.question, self.options, self.duration_seconds).missing
+        return PollDraft(self.question, self.options, self.duration_seconds, self.language).missing
 
     def is_expired(self, now: int | None = None) -> bool:
         return self.status == ACTIVE and self.expires_at is not None and (now or int(time.time())) >= self.expires_at
@@ -175,11 +203,19 @@ def parse_duration_seconds(message: str) -> int | None:
     return amount * multiplier if multiplier else None
 
 
+def detect_poll_language(message: str) -> str:
+    normalized = _normalize_intent_text(message)
+    words = set(normalized.split())
+    if "kura ya maoni" in normalized or words & SWAHILI_MARKERS:
+        return SWAHILI
+    return DEFAULT_LANGUAGE
+
+
 def extract_draft_from_text(message: str) -> PollDraft:
     duration = parse_duration_seconds(message)
     options = _extract_options(message)
     question = _extract_question(message)
-    return PollDraft(question=question, options=options, duration_seconds=duration)
+    return PollDraft(question=question, options=options, duration_seconds=duration, language=detect_poll_language(message))
 
 
 def merge_draft(current: PollState, draft: PollDraft) -> PollState:
@@ -194,6 +230,7 @@ def merge_draft(current: PollState, draft: PollDraft) -> PollState:
         expires_at=current.expires_at,
         votes=current.votes,
         result_reply=current.result_reply,
+        language=current.language,
     )
 
 
@@ -205,6 +242,7 @@ def build_pending_poll(creator_hash: str, draft: PollDraft) -> PollState:
         options=draft.options,
         duration_seconds=draft.duration_seconds,
         created_at=int(time.time()),
+        language=_normalize_language(draft.language),
     )
 
 
@@ -222,6 +260,7 @@ def confirm_poll(state: PollState, now: int | None = None) -> PollState:
         start_time=started,
         expires_at=started + int(state.duration_seconds or 0),
         votes=state.votes,
+        language=state.language,
     )
 
 
@@ -229,7 +268,7 @@ def classify_vote(message: str, state: PollState, voter_hash: str) -> VoteDecisi
     option = match_vote_option(message, state.options, state.question)
     if option is None:
         if _looks_like_bad_vote(message):
-            return VoteDecision("invalid", reply=_valid_vote_help(state.options))
+            return VoteDecision("invalid", reply=_valid_vote_help(state.options, state.language))
         return VoteDecision("ask")
     return _vote_decision_for_option(option, state, voter_hash)
 
@@ -258,23 +297,94 @@ def has_vote_context(message: str, question: str | None) -> bool:
 
 
 def format_pending_vote_context_request() -> str:
+    return format_pending_vote_context_request_for_language(DEFAULT_LANGUAGE)
+
+
+def format_pending_vote_context_request_for_language(language: str) -> str:
+    if _is_swahili(language):
+        return clamp_sms_reply("Kura ipi? Jibu na muktadha, k.m. ndio jenga shule.")
     return clamp_sms_reply("Which poll is this vote for? Reply with context, e.g. yes build the school.")
 
 
-def format_pending_vote_expired() -> str:
+def format_pending_vote_expired(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return clamp_sms_reply("Kura iliyosubiri ilifungwa kabla ya muktadha kufika.")
     return clamp_sms_reply("That pending vote expired before context arrived.")
 
 
-def format_pending_vote_not_matched() -> str:
+def format_pending_vote_not_matched(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return clamp_sms_reply("Sikuweza kuilinganisha na kura hai. Jibu na muktadha kama ndio jenga shule.")
     return clamp_sms_reply("I could not match that vote to an active poll. Reply with context like yes build the school.")
+
+
+def format_ongoing_poll(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Una kura inayoendelea."
+    return "You have an ongoing poll."
+
+
+def format_poll_canceled(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Kura imeghairiwa."
+    return "Poll canceled."
+
+
+def format_poll_not_open(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Kura bado haijafunguliwa."
+    return "Poll is not open yet."
+
+
+def format_poll_closed(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Kura hii imefungwa."
+    return "This poll is closed."
+
+
+def format_multiple_polls(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Kura zaidi ya moja zinafanana. Jibu kwa uwazi zaidi."
+    return "Multiple polls match. Reply with a clearer vote."
+
+
+def format_creator_cannot_vote(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Mtayarishaji hawezi kupiga kura yake mwenyewe."
+    return "Poll creators cannot vote in their own poll."
+
+
+def format_duplicate_vote(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return "Kura yako imesharekodiwa."
+    return "Your vote has already been recorded."
+
+
+def format_vote_recorded(option: str, language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return f"Kura imerekodiwa: {option}."
+    return f"Vote recorded: {option}."
+
+
+def format_invalid_vote(options: list[str], language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return clamp_sms_reply(f"Kura batili. Jibu {_format_options(options)}")
+    return clamp_sms_reply(f"Invalid vote. Reply {_format_options(options)}")
+
+
+def language_for_states(states: list[PollState] | tuple[PollState, ...]) -> str:
+    languages = {_normalize_language(state.language) for state in states}
+    if len(languages) == 1:
+        return next(iter(languages))
+    return DEFAULT_LANGUAGE
 
 
 def _vote_decision_for_option(option: str, state: PollState, voter_hash: str) -> VoteDecision:
     if voter_hash == state.creator_hash:
-        return VoteDecision("invalid", reply="Poll creators cannot vote in their own poll.")
+        return VoteDecision("invalid", reply=format_creator_cannot_vote(state.language))
     if voter_hash in state.votes:
-        return VoteDecision("invalid", reply="Your vote has already been recorded.")
-    return VoteDecision("valid", option=option, reply=f"Vote recorded: {option}.")
+        return VoteDecision("invalid", reply=format_duplicate_vote(state.language))
+    return VoteDecision("valid", option=option, reply=format_vote_recorded(option, state.language))
 
 
 def match_vote_option(message: str, options: list[str], question: str | None = None) -> str | None:
@@ -320,6 +430,7 @@ def record_vote(state: PollState, voter_hash: str, option: str) -> PollState:
         expires_at=state.expires_at,
         votes=votes,
         result_reply=state.result_reply,
+        language=state.language,
     )
 
 
@@ -333,7 +444,15 @@ def aggregate_votes(state: PollState) -> dict[str, int]:
 
 def format_poll_draft(state: PollState) -> str:
     if state.missing:
-        return clamp_sms_reply(f"Poll needs {', '.join(state.missing)}. Reply with AMEND <details>.")
+        missing = _format_missing(state)
+        if _is_swahili(state.language):
+            return clamp_sms_reply(f"Kura inahitaji {missing}. Jibu AMEND <maelezo>.")
+        return clamp_sms_reply(f"Poll needs {missing}. Reply with AMEND <details>.")
+    if _is_swahili(state.language):
+        return clamp_sms_reply(
+            f"Rasimu ya kura: {state.question} Chaguo: {_format_options(state.options)}. "
+            f"Muda: {state.duration_seconds}s. Jibu NDIYO au AMEND ..."
+        )
     return clamp_sms_reply(
         f"Poll draft: {state.question} Options: {_format_options(state.options)}. "
         f"Duration: {state.duration_seconds}s. Reply YES or AMEND ..."
@@ -341,11 +460,18 @@ def format_poll_draft(state: PollState) -> str:
 
 
 def format_amend_help(state: PollState) -> str:
-    prefix = f"Poll needs {', '.join(state.missing)}. " if state.missing else ""
+    if _is_swahili(state.language):
+        prefix = f"Kura inahitaji {_format_missing(state)}. " if state.missing else ""
+        return clamp_sms_reply(f"{prefix}Tuma AMEND <maelezo>, k.m. AMEND chaguo: Ndio, Hapana kwa sekunde 60.")
+    prefix = f"Poll needs {_format_missing(state)}. " if state.missing else ""
     return clamp_sms_reply(f"{prefix}Send AMEND <details>, e.g. AMEND options: Yes, No for 60s.")
 
 
 def format_poll_started(state: PollState) -> str:
+    if _is_swahili(state.language):
+        return clamp_sms_reply(
+            f"Kura imeanza kwa {state.duration_seconds}s: {state.question} Jibu {_format_options(state.options)}"
+        )
     return clamp_sms_reply(
         f"Poll started for {state.duration_seconds}s: {state.question} Reply {_format_options(state.options)}"
     )
@@ -354,6 +480,8 @@ def format_poll_started(state: PollState) -> str:
 def format_counts(state: PollState) -> str:
     counts = aggregate_votes(state)
     parts = ", ".join(f"{option} {count}" for option, count in counts.items())
+    if _is_swahili(state.language):
+        return clamp_sms_reply(f"Kura imefungwa: {state.question} {parts}. Jumla {len(state.votes)}.")
     return clamp_sms_reply(f"Poll closed: {state.question} {parts}. Total {len(state.votes)}.")
 
 
@@ -386,11 +514,12 @@ def _extract_options(message: str) -> list[str]:
     yes_no = re.search(r"\b(yes|ndio|naam)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(no|hapana|la)\b", message, re.I)
     no_yes = re.search(r"\b(no|hapana|la)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(yes|ndio|naam)\b", message, re.I)
     if yes_no:
-        return ["Yes", "No"]
+        return _default_yes_no_options(detect_poll_language(message))
     if no_yes:
-        return ["No", "Yes"]
+        yes, no = _default_yes_no_options(detect_poll_language(message))
+        return [no, yes]
     if _positive_negative_question(message):
-        return ["Yes", "No"]
+        return _default_yes_no_options(detect_poll_language(message))
     return []
 
 
@@ -510,6 +639,34 @@ def _contains_intent_phrase(normalized_message: str, phrase: str) -> bool:
     if not normalized_phrase:
         return False
     return re.search(rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])", normalized_message) is not None
+
+
+def _normalize_language(language: str) -> str:
+    normalized = language.strip().lower()
+    if normalized in {"sw", "swahili", "kiswahili"}:
+        return SWAHILI
+    return DEFAULT_LANGUAGE
+
+
+def _is_swahili(language: str) -> bool:
+    return _normalize_language(language) == SWAHILI
+
+
+def _default_yes_no_options(language: str) -> list[str]:
+    if _is_swahili(language):
+        return ["Ndio", "Hapana"]
+    return ["Yes", "No"]
+
+
+def _format_missing(state: PollState) -> str:
+    if not _is_swahili(state.language):
+        return ", ".join(state.missing)
+    labels = {
+        "question": "swali",
+        "options": "chaguo",
+        "duration": "muda",
+    }
+    return ", ".join(labels.get(item, item) for item in state.missing)
 
 
 def _normalize(text: str) -> str:
@@ -633,8 +790,8 @@ def _stem_context_word(word: str) -> str:
     return word
 
 
-def _valid_vote_help(options: list[str]) -> str:
-    return clamp_sms_reply(f"Invalid vote. Reply {_format_options(options)}")
+def _valid_vote_help(options: list[str], language: str = DEFAULT_LANGUAGE) -> str:
+    return format_invalid_vote(options, language)
 
 
 def _format_options(options: list[str]) -> str:

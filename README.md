@@ -34,7 +34,9 @@ The daemon creates a pending poll and replies with a draft. The creator can then
 - `AMEND <new wording/options/duration>` to revise it.
 - `CANCEL` to discard it.
 
-Each creator MSISDN hash can have one ongoing poll at a time. If the same creator asks for another poll before their current poll closes, they receive `You have an ongoing poll.` Other MSISDNs can still create their own polls while responding to polls created by someone else.
+Poll system replies use the language detected from the creator's original poll request. For example, a Kiswahili poll request receives Kiswahili draft, amend, start, vote, close, and result replies.
+
+Each creator MSISDN hash can have one ongoing poll at a time. If the same creator asks for another poll before their current poll closes, they receive `You have an ongoing poll.` or its localized equivalent. Other MSISDNs can still create their own polls while responding to polls created by someone else.
 
 While a poll is active, any sender except that poll's creator can vote once. Votes should include poll context, such as `yes build the school`, `build the school`, or `do not build the school`, so the daemon can match the vote to exactly one active poll. Context-free replies such as `yes`, `no`, `1`, or `maybe` are held as pending votes and the sender is asked for more context. If the matching poll expires before context arrives, the pending vote is discarded. The creator's vote in their own poll is rejected, but they can vote in other active polls. Duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match exactly one active poll continue through the normal ChatGPT flow.
 

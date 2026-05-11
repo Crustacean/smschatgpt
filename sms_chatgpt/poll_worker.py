@@ -19,6 +19,9 @@ from .polls import (
     extract_draft_from_text,
     format_counts,
     format_amend_help,
+    format_invalid_vote,
+    format_poll_canceled,
+    format_poll_closed,
     format_poll_draft,
     format_poll_started,
     merge_draft,
@@ -114,11 +117,12 @@ def confirm_pending_poll(path: Path) -> dict[str, Any]:
 
 
 def cancel_poll(path: Path) -> dict[str, Any]:
+    state = load_state(path)
     try:
         path.unlink()
     except FileNotFoundError:
         pass
-    return {"handled": True, "reply": "Poll canceled."}
+    return {"handled": True, "reply": format_poll_canceled(state.language if state else "en")}
 
 
 def vote_poll(path: Path, voter_hash: str, message: str) -> dict[str, Any]:
@@ -129,14 +133,14 @@ def vote_poll(path: Path, voter_hash: str, message: str) -> dict[str, Any]:
     if state.is_expired():
         if decision.kind == "ask":
             return {"handled": False, "route_to_chat": True}
-        return {"handled": True, "reply": "This poll is closed."}
+        return {"handled": True, "reply": format_poll_closed(state.language)}
     if decision.kind == "ask":
         return {"handled": False, "route_to_chat": True}
     if decision.kind == "invalid":
-        return {"handled": True, "reply": decision.reply or "Invalid vote."}
+        return {"handled": True, "reply": decision.reply or format_invalid_vote(state.options, state.language)}
     state = record_vote(state, voter_hash, decision.option or "")
     save_state(path, state)
-    return {"handled": True, "reply": decision.reply or "Vote recorded.", "state": state.to_dict()}
+    return {"handled": True, "reply": decision.reply, "state": state.to_dict()}
 
 
 def status_poll(path: Path) -> dict[str, Any]:
@@ -178,7 +182,8 @@ def extract_draft(message: str, llm: LlmClient) -> PollDraft:
     fallback = extract_draft_from_text(message)
     prompt = (
         "Extract an SMS poll draft as strict JSON with keys question, options, "
-        "duration_seconds. Use null for missing values. Message: "
+        "duration_seconds, language. Use null for missing values. Preserve the "
+        "creator's language and use ISO 639-1 for language. Message: "
         f"{message}"
     )
     try:
@@ -193,6 +198,7 @@ def extract_draft(message: str, llm: LlmClient) -> PollDraft:
                 question=parsed.question or fallback.question,
                 options=parsed.options or fallback.options,
                 duration_seconds=parsed.duration_seconds or fallback.duration_seconds,
+                language=parsed.language or fallback.language,
             )
     except Exception:
         pass
@@ -201,8 +207,9 @@ def extract_draft(message: str, llm: LlmClient) -> PollDraft:
 
 def summarize_results(state: PollState, llm: LlmClient) -> str:
     counts = format_counts(state)
+    language_name = "Kiswahili" if state.language == "sw" else "English"
     prompt = (
-        "Summarize these anonymous SMS poll results in 140 characters or fewer. "
+        f"Summarize these anonymous SMS poll results in {language_name} in 140 characters or fewer. "
         "Do not include voter identifiers. "
         f"{counts}"
     )
@@ -236,6 +243,7 @@ def _parse_draft_json(response: str) -> PollDraft | None:
         question=str(data.get("question") or "").strip(),
         options=[str(option).strip() for option in options if str(option).strip()],
         duration_seconds=int(duration) if duration else None,
+        language=str(data.get("language") or "").strip(),
     )
 
 

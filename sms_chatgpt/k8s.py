@@ -27,17 +27,28 @@ from .polls import (
     PollState,
     classify_vote,
     contains_poll_intent,
-    format_pending_vote_context_request,
+    format_creator_cannot_vote,
+    format_duplicate_vote,
+    format_multiple_polls,
+    format_ongoing_poll,
+    format_pending_vote_context_request_for_language,
     format_pending_vote_expired,
     format_pending_vote_not_matched,
+    format_poll_closed,
+    format_poll_not_open,
     hash_msisdn,
     is_contextless_vote,
+    language_for_states,
     match_vote_option,
     parse_creator_command,
     resolve_pending_vote,
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _language_for_statuses(statuses: list[dict]) -> str:
+    return language_for_states([PollState.from_dict(status.get("state") or {}) for status in statuses])
 
 
 class ChatPodManager:
@@ -183,7 +194,7 @@ class PollPodManager:
 
         if contains_poll_intent(body, self.settings.poll_keywords):
             if own and (own.get("state") or {}).get("status") in {PENDING, ACTIVE, CLOSED}:
-                return PollResponse(True, "You have an ongoing poll.")
+                return PollResponse(True, format_ongoing_poll((own.get("state") or {}).get("language", "en")))
             pod_name = self._pod_name(sender_hash)
             self._ensure_pod(pod_name, sender, sender_hash)
             result = self._exec(pod_name, "draft", "--creator-hash", sender_hash, "--message", body)
@@ -213,12 +224,16 @@ class PollPodManager:
         if vote_response.handled:
             return vote_response
 
-        if any(
-            match_vote_option(body, (item.get("state") or {}).get("options") or [], (item.get("state") or {}).get("question"))
+        pending_matches = [
+            PollState.from_dict(item.get("state") or {})
             for item in statuses
-            if (item.get("state") or {}).get("status") == PENDING
-        ):
-            return PollResponse(True, "Poll is not open yet.")
+            if (
+                (item.get("state") or {}).get("status") == PENDING
+                and match_vote_option(body, (item.get("state") or {}).get("options") or [], (item.get("state") or {}).get("question"))
+            )
+        ]
+        if pending_matches:
+            return PollResponse(True, format_poll_not_open(language_for_states(pending_matches)))
 
         return PollResponse(False)
 
@@ -356,15 +371,17 @@ class PollPodManager:
                 )
             ]
             if eligible:
+                language = language_for_states([PollState.from_dict(status.get("state") or {}) for status in eligible])
                 self.pending_votes[sender_hash] = PendingVote(
                     body,
                     tuple(status["pod_name"] for status in eligible),
+                    language,
                 )
-                return PollResponse(True, format_pending_vote_context_request())
+                return PollResponse(True, format_pending_vote_context_request_for_language(language))
             if any((status.get("state") or {}).get("creator_hash") == sender_hash for status in active_statuses):
-                return PollResponse(True, "Poll creators cannot vote in their own poll.")
+                return PollResponse(True, format_creator_cannot_vote(_language_for_statuses(active_statuses)))
             if any(sender_hash in ((status.get("state") or {}).get("votes") or {}) for status in active_statuses):
-                return PollResponse(True, "Your vote has already been recorded.")
+                return PollResponse(True, format_duplicate_vote(_language_for_statuses(active_statuses)))
 
         other_matches: list[tuple[dict, PollState, object]] = []
         own_match = None
@@ -382,17 +399,17 @@ class PollPodManager:
                 other_matches.append((status, state, decision))
 
         if len(other_matches) > 1:
-            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in other_matches])))
         if len(other_matches) == 1:
             status, state, decision = other_matches[0]
             if state.is_expired():
-                return PollResponse(True, "This poll is closed.")
+                return PollResponse(True, format_poll_closed(state.language))
             result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
             if result.get("route_to_chat"):
                 return PollResponse(False)
             return PollResponse(bool(result.get("handled", True)), result.get("reply"))
         if own_match:
-            return PollResponse(True, "Poll creators cannot vote in their own poll.")
+            return PollResponse(True, format_creator_cannot_vote(own_match[1].language))
         return PollResponse(False)
 
     def _handle_pending_vote_context(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
@@ -410,13 +427,15 @@ class PollPodManager:
         ]
         if not active_candidates:
             self.pending_votes.pop(sender_hash, None)
-            return PollResponse(True, format_pending_vote_expired())
+            return PollResponse(True, format_pending_vote_expired(pending.language))
         if is_contextless_vote(body):
+            language = _language_for_statuses(active_candidates)
             self.pending_votes[sender_hash] = PendingVote(
                 body,
                 tuple(status["pod_name"] for status in active_candidates),
+                language,
             )
-            return PollResponse(True, format_pending_vote_context_request())
+            return PollResponse(True, format_pending_vote_context_request_for_language(language))
 
         matches: list[tuple[dict, PollState, object]] = []
         for status in active_candidates:
@@ -426,7 +445,7 @@ class PollPodManager:
                 matches.append((status, state, decision))
 
         if len(matches) > 1:
-            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in matches])))
         if len(matches) == 1:
             status, _state, decision = matches[0]
             if decision.kind == "invalid":
@@ -437,7 +456,7 @@ class PollPodManager:
                 result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
             self.pending_votes.pop(sender_hash, None)
             return PollResponse(bool(result.get("handled", True)), result.get("reply"))
-        return PollResponse(True, format_pending_vote_not_matched())
+        return PollResponse(True, format_pending_vote_not_matched(_language_for_statuses(active_candidates)))
 
     def _discard_closed_pending_votes(self) -> None:
         active_pod_names = {

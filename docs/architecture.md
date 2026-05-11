@@ -24,7 +24,7 @@ flowchart LR
         subgraph polls[Per-creator poll pods]
             pollPod[poll pod<br/>sms-poll-active-&lt;creator-hash&gt;]
             pollWorker[poll worker<br/>sms_chatgpt.poll_worker]
-            pollState[(poll state<br/>/tmp/sms-chatgpt-poll.json)]
+            pollState[(poll state<br/>/tmp/sms-chatgpt-poll.json<br/>includes reply language)]
         end
     end
 
@@ -105,6 +105,7 @@ flowchart TD
 - Each creator hash can have one pending or active poll. Other MSISDNs can still create their own polls and vote in polls created by others.
 - Poll pods run the worker image and execute `python -m sms_chatgpt.poll_worker` for `draft`, `amend`, `confirm`, `vote`, `status`, and `finalize` actions.
 - Poll state is stored inside the poll pod at `POLL_STATE_FILE`. It stores the creator hash, question, options, duration, expiry, and votes keyed by voter hash, not raw voter MSISDNs.
+- Poll state also stores the language detected from the creator's original request. Draft, amend, start, vote, close, and result replies use that language, with English as the fallback.
 - The creator cannot vote in their own poll. Each voter hash can vote once per poll, and natural-language vote matching checks the vote text against the poll question context.
 - Context-free vote-like SMS such as `yes`, `no`, `1`, or `maybe` are held in the daemon as pending votes. The sender must provide context before the matched poll expires, otherwise the pending vote is discarded.
 - On each daemon loop, expired polls are finalized, anonymous aggregate counts are summarized through OpenAI, the result is sent only to the creator, and the poll pod is deleted after the send is acknowledged.

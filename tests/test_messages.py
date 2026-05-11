@@ -146,7 +146,7 @@ class PollsTest(unittest.TestCase):
         )
 
         self.assertEqual(draft.question, "Kujenga maktaba ya jamii?")
-        self.assertEqual(draft.options, ["Yes", "No"])
+        self.assertEqual(draft.options, ["Ndio", "Hapana"])
         self.assertEqual(draft.duration_seconds, 90)
         self.assertEqual(draft.missing, [])
 
@@ -328,9 +328,43 @@ class LocalPollManagerTest(unittest.TestCase):
             )
 
             self.assertTrue(draft.handled)
-            self.assertIn("Poll draft", draft.reply or "")
-            self.assertIn("Options: 1) Yes 2) No", draft.reply or "")
-            self.assertIn("Duration: 90s", draft.reply or "")
+            self.assertIn("Rasimu ya kura", draft.reply or "")
+            self.assertIn("Chaguo: 1) Ndio 2) Hapana", draft.reply or "")
+            self.assertIn("Muda: 90s", draft.reply or "")
+
+    def test_swahili_poll_system_replies_match_creator_language(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+
+            draft = manager.handle_message(
+                "+15550000001",
+                "Tengeneza kura ya maoni kujenga au kutojenga maktaba ya jamii kwa sekunde 1",
+            )
+            started = manager.handle_message("+15550000001", "NDIYO")
+            vote = manager.handle_message("+15550000002", "ndio kujenga maktaba")
+            duplicate = manager.handle_message("+15550000002", "hapana kujenga maktaba")
+            creator_vote = manager.handle_message("+15550000001", "ndio kujenga maktaba")
+            contextless = manager.handle_message("+15550000003", "ndio")
+            creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
+            state_path = manager._state_path(creator_hash)
+            state = load_state(state_path)
+            self.assertIsNotNone(state)
+            state.expires_at = 0
+            save_state(state_path, state)
+            late_context = manager.handle_message("+15550000003", "kujenga maktaba")
+            outbound = manager.close_expired()
+
+            self.assertIn("Rasimu ya kura", draft.reply or "")
+            self.assertIn("Kura imeanza", started.reply or "")
+            self.assertEqual(vote.reply, "Kura imerekodiwa: Ndio.")
+            self.assertEqual(duplicate.reply, "Kura yako imesharekodiwa.")
+            self.assertIn("hawezi kupiga kura", creator_vote.reply or "")
+            self.assertIn("Kura ipi?", contextless.reply or "")
+            self.assertIn("ilifungwa", late_context.reply or "")
+            self.assertEqual(outbound[0].recipient, "+15550000001")
+            self.assertIn("Kura imefungwa", outbound[0].body)
 
     def test_creator_can_amend_missing_poll_details_after_bare_amend(self) -> None:
         with TemporaryDirectory() as temp_dir:
