@@ -14,12 +14,18 @@
 
 ## SMS Polls
 
-When `POLL_ENABLED=true`, inbound messages containing keywords such as `poll`, `vote`, or `voting` start the poll flow instead of the normal chat flow.
+When `POLL_ENABLED=true`, inbound messages containing poll intent phrases start the poll flow instead of the normal chat flow. English keywords such as `poll`, `vote`, and `voting` are supported, along with built-in translated phrases such as Kiswahili `kura ya maoni`. `POLL_KEYWORDS` can add more site-specific words or phrases.
 
 Example creator SMS:
 
 ```text
 Create a Yes or No poll on funding to dig a local well for 60 seconds
+```
+
+Kiswahili-style creator SMS are also accepted when the intent, duration, and choices are clear:
+
+```text
+Tengeneza kura ya maoni kujenga au kutojenga maktaba ya jamii kwa sekunde 90
 ```
 
 The daemon creates a pending poll and replies with a draft. The creator can then reply:

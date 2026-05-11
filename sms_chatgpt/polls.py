@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -13,11 +14,38 @@ ACTIVE = "active"
 CLOSED = "closed"
 CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start"}
 CANCEL_WORDS = {"cancel", "stop"}
-YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve"}
-NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject"}
+YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve", "ndio", "naam"}
+NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject", "hapana", "la"}
+YES_OPTION_LABELS = {"yes", "y", "ndio", "naam"}
+NO_OPTION_LABELS = {"no", "n", "hapana", "la"}
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
-POSITIVE_VOTE_WORDS = {"support", "favor", "favour", "approve", "agree"}
-NEGATIVE_VOTE_WORDS = {"against", "oppose", "opposed", "reject"}
+POSITIVE_VOTE_WORDS = {"support", "favor", "favour", "approve", "agree", "unga"}
+NEGATIVE_VOTE_WORDS = {"against", "oppose", "opposed", "reject", "pinga"}
+DEFAULT_POLL_INTENT_PHRASES = {
+    "poll",
+    "vote",
+    "voting",
+    "survey",
+    "kura",
+    "kura ya maoni",
+    "piga kura",
+    "upigaji kura",
+    "encuesta",
+    "votacion",
+    "votar",
+    "voto",
+    "sondage",
+    "umfrage",
+    "abstimmung",
+    "sondaggio",
+    "votazione",
+    "pesquisa",
+    "votacao",
+}
+_DURATION_UNITS_RE = (
+    r"seconds?|secs?|sec|minutes?|mins?|min|hours?|hrs?|hr|"
+    r"sekunde|sek|dakika|saa|s|m|h"
+)
 CONTEXT_STOPWORDS = {
     "a",
     "about",
@@ -36,12 +64,20 @@ CONTEXT_STOPWORDS = {
     "on",
     "or",
     "poll",
+    "au",
+    "katika",
+    "kwa",
+    "kuhusu",
+    "na",
+    "ni",
     "that",
     "the",
     "this",
     "to",
     "vote",
     "we",
+    "ya",
+    "za",
 }
 
 
@@ -117,23 +153,25 @@ def hash_msisdn(msisdn: str, salt: str) -> str:
 
 
 def contains_poll_intent(message: str, keywords: list[str]) -> bool:
-    words = {word.lower() for word in re.findall(r"[a-zA-Z]+", message)}
-    return any(keyword.lower() in words for keyword in keywords)
+    normalized_message = _normalize_intent_text(message)
+    phrases = list(keywords) + sorted(DEFAULT_POLL_INTENT_PHRASES)
+    return any(_contains_intent_phrase(normalized_message, phrase) for phrase in phrases)
 
 
 def parse_duration_seconds(message: str) -> int | None:
-    match = re.search(r"\b(\d{1,5})\s*(seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|h)\b", message, re.I)
+    match = re.search(rf"\b(\d{{1,5}})\s*({_DURATION_UNITS_RE})\b", message, re.I)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        multiplier = _duration_multiplier(unit)
+        return amount * multiplier if multiplier else None
+    match = re.search(rf"\b({_DURATION_UNITS_RE})\s*(\d{{1,5}})\b", message, re.I)
     if not match:
         return None
-    amount = int(match.group(1))
-    unit = match.group(2).lower()
-    if unit.startswith(("s", "sec")):
-        return amount
-    if unit.startswith(("m", "min")):
-        return amount * 60
-    if unit.startswith(("h", "hr")):
-        return amount * 3600
-    return None
+    unit = match.group(1)
+    amount = int(match.group(2))
+    multiplier = _duration_multiplier(unit)
+    return amount * multiplier if multiplier else None
 
 
 def extract_draft_from_text(message: str) -> PollDraft:
@@ -288,19 +326,20 @@ def parse_creator_command(message: str) -> tuple[str, str]:
 
 
 def _extract_options(message: str) -> list[str]:
-    explicit = re.search(r"\boptions?\s*[:=-]\s*", message, re.I)
+    explicit = re.search(r"\b(options?|choices?|chaguo)\s*[:=-]\s*", message, re.I)
     if explicit:
         raw = message[explicit.end() :]
         duration = re.search(
-            r"\b(?:for|duration)?\s*\d{1,5}\s*(?:seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|h)\b",
+            rf"\b(?:for|duration|kwa|muda\s+wa)?\s*"
+            rf"(?:\d{{1,5}}\s*(?:{_DURATION_UNITS_RE})|(?:{_DURATION_UNITS_RE})\s*\d{{1,5}})\b",
             raw,
             re.I,
         )
         if duration:
             raw = raw[: duration.start()]
         return _split_options(raw)
-    yes_no = re.search(r"\b(yes)\s*(?:/|,|\bor\b|\s+or\s+)\s*(no)\b", message, re.I)
-    no_yes = re.search(r"\b(no)\s*(?:/|,|\bor\b|\s+or\s+)\s*(yes)\b", message, re.I)
+    yes_no = re.search(r"\b(yes|ndio|naam)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(no|hapana|la)\b", message, re.I)
+    no_yes = re.search(r"\b(no|hapana|la)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(yes|ndio|naam)\b", message, re.I)
     if yes_no:
         return ["Yes", "No"]
     if no_yes:
@@ -312,12 +351,12 @@ def _extract_options(message: str) -> list[str]:
 
 def _split_options(raw: str) -> list[str]:
     cleaned = _remove_duration(raw)
-    parts = re.split(r"\s*(?:,|/|\||;|\bor\b)\s*", cleaned, flags=re.I)
+    parts = re.split(r"\s*(?:,|/|\||;|\bor\b|\bau\b)\s*", cleaned, flags=re.I)
     options: list[str] = []
     for part in parts:
         option = re.sub(r"^\d+[\).:-]?\s*", "", part.strip())
         option = option.strip(" .")
-        if option and option.lower() not in {"for", "duration"}:
+        if option and option.lower() not in {"for", "duration", "kwa", "muda"}:
             options.append(option[:40])
     return options[:8]
 
@@ -327,11 +366,10 @@ def _extract_question(message: str) -> str:
     if positive_negative:
         return positive_negative
     text = _remove_duration(message)
-    text = re.sub(r"\b(options?|choices?)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
-    text = re.sub(r"\b(create|start|make|run|please)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(poll|vote|voting|survey)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(with|using)\s+(yes|no)\s*(?:/|,|\bor\b|\s+or\s+)\s*(yes|no)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(yes|no)\s*(?:/|,|\bor\b|\s+or\s+)\s*(yes|no)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(options?|choices?|chaguo)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
+    text = _strip_poll_request_terms(text)
+    text = re.sub(r"\b(with|using)\s+(yes|ndio|naam|no|hapana|la)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(yes|ndio|naam|no|hapana|la)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(yes|ndio|naam|no|hapana|la)\s*(?:/|,|\bor\b|\bau\b|\s+or\s+|\s+au\s+)\s*(yes|ndio|naam|no|hapana|la)\b", " ", text, flags=re.I)
     text = re.sub(r"\s+", " ", text).strip(" .:-")
     text = re.sub(r"^(a|an|the)\s+", "", text, flags=re.I)
     if text.lower().startswith("on "):
@@ -346,9 +384,8 @@ def _extract_question(message: str) -> str:
 
 def _positive_negative_question(message: str) -> str | None:
     text = _remove_duration(message)
-    text = re.sub(r"\b(options?|choices?)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
-    text = re.sub(r"\b(create|start|make|run|please)\b", " ", text, flags=re.I)
-    text = re.sub(r"\b(poll|vote|voting|survey|whether)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(options?|choices?|chaguo)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
+    text = _strip_poll_request_terms(text)
     text = re.sub(r"\s+", " ", text).strip(" .:-")
     text = re.sub(r"^(a|an|the|on|about)\s+", "", text, flags=re.I)
     match = re.search(
@@ -358,6 +395,20 @@ def _positive_negative_question(message: str) -> str | None:
         text,
         re.I,
     )
+    swahili_match = re.search(
+        r"\bku(?P<verb>[a-z][a-z'-]*)\s+au\s+kuto\s*(?P=verb)\s+(?P<object>.+)$",
+        text,
+        re.I,
+    )
+    if not match and swahili_match:
+        subject = re.sub(r"\s+", " ", swahili_match.group("object")).strip(" .:-")
+        if not subject:
+            return None
+        question = f"Ku{swahili_match.group('verb').lower()} {subject}"
+        question = question[0].upper() + question[1:]
+        if not question.endswith("?"):
+            question = f"{question}?"
+        return question
     if not match:
         return None
     subject = re.sub(r"\s+", " ", match.group("object")).strip(" .:-")
@@ -371,7 +422,49 @@ def _positive_negative_question(message: str) -> str | None:
 
 
 def _remove_duration(message: str) -> str:
-    return re.sub(r"\b(?:for|last(?:ing)?|duration)?\s*\d{1,5}\s*(?:seconds?|secs?|sec|s|minutes?|mins?|min|m|hours?|hrs?|h)\b", " ", message, flags=re.I)
+    return re.sub(
+        rf"\b(?:for|last(?:ing)?|duration|kwa\s+muda\s+wa|muda\s+wa|kwa)?\s*"
+        rf"(?:\d{{1,5}}\s*(?:{_DURATION_UNITS_RE})|(?:{_DURATION_UNITS_RE})\s*\d{{1,5}})\b",
+        " ",
+        message,
+        flags=re.I,
+    )
+
+
+def _duration_multiplier(unit: str) -> int | None:
+    normalized = unit.strip().lower()
+    if normalized == "s" or normalized.startswith(("sec", "sek", "second")):
+        return 1
+    if normalized == "m" or normalized.startswith(("min", "dakika")):
+        return 60
+    if normalized == "h" or normalized.startswith(("hr", "hour")) or normalized == "saa":
+        return 3600
+    return None
+
+
+def _strip_poll_request_terms(text: str) -> str:
+    text = re.sub(r"\b(kura\s+ya\s+maoni|upigaji\s+kura|piga\s+kura)\b", " ", text, flags=re.I)
+    text = re.sub(
+        r"\b(create|start|make|run|please|tengeneza|anzisha|unda|endesha|tafadhali)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    return re.sub(r"\b(poll|vote|voting|survey|whether|kura|kuhusu)\b", " ", text, flags=re.I)
+
+
+def _normalize_intent_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    normalized = re.sub(r"[^0-9a-zA-Z']+", " ", normalized.lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _contains_intent_phrase(normalized_message: str, phrase: str) -> bool:
+    normalized_phrase = _normalize_intent_text(phrase)
+    if not normalized_phrase:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(normalized_phrase)}(?![a-z0-9])", normalized_message) is not None
 
 
 def _normalize(text: str) -> str:
@@ -379,8 +472,8 @@ def _normalize(text: str) -> str:
 
 
 def _yes_no_options(options: list[str]) -> tuple[str | None, str | None]:
-    yes_option = next((option for option in options if _normalize(option) == "yes"), None)
-    no_option = next((option for option in options if _normalize(option) == "no"), None)
+    yes_option = next((option for option in options if _normalize(option) in YES_OPTION_LABELS), None)
+    no_option = next((option for option in options if _normalize(option) in NO_OPTION_LABELS), None)
     return yes_option, no_option
 
 

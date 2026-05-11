@@ -109,6 +109,8 @@ class WorkerHistoryTest(unittest.TestCase):
 class PollsTest(unittest.TestCase):
     def test_detects_poll_intent(self) -> None:
         self.assertTrue(contains_poll_intent("Create a voting poll for the well", ["poll", "vote", "voting"]))
+        self.assertTrue(contains_poll_intent("Tengeneza kura ya maoni kuhusu maktaba ya jamii", ["poll", "vote", "voting"]))
+        self.assertTrue(contains_poll_intent("Crear una encuesta para el pozo", ["poll", "vote", "voting"]))
         self.assertFalse(contains_poll_intent("What is the weather?", ["poll", "vote", "voting"]))
 
     def test_hash_msisdn_uses_salt(self) -> None:
@@ -137,8 +139,28 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(draft.duration_seconds, 90)
         self.assertEqual(draft.missing, [])
 
+    def test_extracts_swahili_positive_negative_poll_draft(self) -> None:
+        draft = extract_draft_from_text(
+            "Tengeneza kura ya maoni kujenga au kutojenga maktaba ya jamii kwa sekunde 90"
+        )
+
+        self.assertEqual(draft.question, "Kujenga maktaba ya jamii?")
+        self.assertEqual(draft.options, ["Yes", "No"])
+        self.assertEqual(draft.duration_seconds, 90)
+        self.assertEqual(draft.missing, [])
+
+    def test_extracts_swahili_explicit_options(self) -> None:
+        draft = extract_draft_from_text(
+            "Tengeneza kura ya maoni kuhusu maktaba ya jamii chaguo: Ndio au Hapana kwa sekunde 90"
+        )
+
+        self.assertEqual(draft.options, ["Ndio", "Hapana"])
+        self.assertEqual(draft.duration_seconds, 90)
+        self.assertEqual(draft.missing, [])
+
     def test_parse_duration_minutes(self) -> None:
         self.assertEqual(parse_duration_seconds("poll for 5 minutes"), 300)
+        self.assertEqual(parse_duration_seconds("kura ya maoni kwa dakika 5"), 300)
 
     def test_classifies_valid_vote_by_number(self) -> None:
         state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
@@ -276,6 +298,22 @@ class LocalPollManagerTest(unittest.TestCase):
 
             self.assertTrue(draft.handled)
             self.assertIn("Poll needs options, duration", draft.reply or "")
+
+    def test_swahili_poll_request_starts_poll_flow_without_llm(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file, llm_provider="openai", openai_api_key=None)
+            manager = LocalPollManager(settings)
+
+            draft = manager.handle_message(
+                "+15550000001",
+                "Tengeneza kura ya maoni kujenga au kutojenga maktaba ya jamii kwa sekunde 90",
+            )
+
+            self.assertTrue(draft.handled)
+            self.assertIn("Poll draft", draft.reply or "")
+            self.assertIn("Options: 1) Yes 2) No", draft.reply or "")
+            self.assertIn("Duration: 90s", draft.reply or "")
 
     def test_creator_can_amend_missing_poll_details_after_bare_amend(self) -> None:
         with TemporaryDirectory() as temp_dir:
