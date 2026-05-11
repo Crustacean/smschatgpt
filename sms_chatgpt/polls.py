@@ -305,6 +305,8 @@ def _extract_options(message: str) -> list[str]:
         return ["Yes", "No"]
     if no_yes:
         return ["No", "Yes"]
+    if _positive_negative_question(message):
+        return ["Yes", "No"]
     return []
 
 
@@ -321,6 +323,9 @@ def _split_options(raw: str) -> list[str]:
 
 
 def _extract_question(message: str) -> str:
+    positive_negative = _positive_negative_question(message)
+    if positive_negative:
+        return positive_negative
     text = _remove_duration(message)
     text = re.sub(r"\b(options?|choices?)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
     text = re.sub(r"\b(create|start|make|run|please)\b", " ", text, flags=re.I)
@@ -337,6 +342,32 @@ def _extract_question(message: str) -> str:
     if not text.endswith("?"):
         text = f"{text}?"
     return text
+
+
+def _positive_negative_question(message: str) -> str | None:
+    text = _remove_duration(message)
+    text = re.sub(r"\b(options?|choices?)\s*[:=-]\s*.+$", "", text, flags=re.I).strip()
+    text = re.sub(r"\b(create|start|make|run|please)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(poll|vote|voting|survey|whether)\b", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" .:-")
+    text = re.sub(r"^(a|an|the|on|about)\s+", "", text, flags=re.I)
+    match = re.search(
+        r"\b(?:to\s+)?(?P<verb>[a-z][a-z'-]*)\s+or\s+"
+        r"(?:not|do\s+not|don't|dont)\s+(?:to\s+)?(?P=verb)\s+"
+        r"(?P<object>.+)$",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    subject = re.sub(r"\s+", " ", match.group("object")).strip(" .:-")
+    if not subject:
+        return None
+    question = f"{match.group('verb').lower()} {subject}"
+    question = question[0].upper() + question[1:]
+    if not question.endswith("?"):
+        question = f"{question}?"
+    return question
 
 
 def _remove_duration(message: str) -> str:

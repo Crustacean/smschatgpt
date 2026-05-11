@@ -127,6 +127,16 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(draft.duration_seconds, 60)
         self.assertIn("Funding to dig a local well", draft.question)
 
+    def test_extracts_yes_no_from_positive_negative_context(self) -> None:
+        draft = extract_draft_from_text(
+            "Start a poll to build or not to build a community library. Run for 90s"
+        )
+
+        self.assertEqual(draft.question, "Build a community library?")
+        self.assertEqual(draft.options, ["Yes", "No"])
+        self.assertEqual(draft.duration_seconds, 90)
+        self.assertEqual(draft.missing, [])
+
     def test_parse_duration_minutes(self) -> None:
         self.assertEqual(parse_duration_seconds("poll for 5 minutes"), 300)
 
