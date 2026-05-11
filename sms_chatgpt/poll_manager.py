@@ -16,6 +16,7 @@ from .polls import (
     classify_vote,
     confirm_poll,
     contains_poll_intent,
+    format_amend_help,
     format_poll_draft,
     format_poll_started,
     hash_msisdn,
@@ -75,7 +76,9 @@ class LocalPollManager:
             if command == "cancel":
                 self._delete_state(sender_hash)
                 return PollResponse(True, "Poll canceled.")
-            if not body.strip().lower().startswith("amend "):
+            if command == "amend" and not details:
+                return PollResponse(True, format_amend_help(own))
+            if not body.strip().lower().startswith("amend"):
                 vote_response = self._handle_vote(sender_hash, body, states)
                 if vote_response.handled:
                     return vote_response

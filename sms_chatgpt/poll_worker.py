@@ -18,6 +18,7 @@ from .polls import (
     confirm_poll,
     extract_draft_from_text,
     format_counts,
+    format_amend_help,
     format_poll_draft,
     format_poll_started,
     merge_draft,
@@ -93,6 +94,8 @@ def amend_poll(path: Path, message: str, llm: LlmClient) -> dict[str, Any]:
     command, details = parse_creator_command(message)
     if command == "cancel":
         return cancel_poll(path)
+    if command == "amend" and not details:
+        return {"handled": True, "reply": format_amend_help(state), "state": state.to_dict()}
     draft = extract_draft(details, llm)
     state = merge_draft(state, draft)
     save_state(path, state)

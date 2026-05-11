@@ -7,7 +7,7 @@ from sms_chatgpt.daemon import _send_poll_results
 from sms_chatgpt.k8s import ChatPodManager, PollPodManager
 from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
 from sms_chatgpt.poll_manager import LocalPollManager
-from sms_chatgpt.poll_worker import build_poll_llm, load_state, save_state
+from sms_chatgpt.poll_worker import amend_poll, build_poll_llm, load_state, save_state
 from sms_chatgpt.polls import (
     build_pending_poll,
     classify_vote,
@@ -198,6 +198,19 @@ class PollsTest(unittest.TestCase):
             llm.complete([{"role": "user", "content": "hello"}]),
         )
 
+    def test_bare_amend_prompts_for_details_without_overwriting_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "poll.json"
+            state = build_pending_poll("creator", extract_draft_from_text("poll to fund digging of a well"))
+            save_state(state_path, state)
+
+            result = amend_poll(state_path, "AMEND", build_poll_llm("echo", None, "unused"))
+            saved = load_state(state_path)
+
+            self.assertIn("Send AMEND <details>", result["reply"])
+            self.assertIsNotNone(saved)
+            self.assertIn("fund digging", saved.question)
+
 
 class LocalPollManagerTest(unittest.TestCase):
     def test_poll_flow_and_chat_fallback(self) -> None:
@@ -253,6 +266,21 @@ class LocalPollManagerTest(unittest.TestCase):
 
             self.assertTrue(draft.handled)
             self.assertIn("Poll needs options, duration", draft.reply or "")
+
+    def test_creator_can_amend_missing_poll_details_after_bare_amend(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file, llm_provider="openai", openai_api_key=None)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message("+15550000001", "poll to fund digging of a well")
+            bare_amend = manager.handle_message("+15550000001", "AMEND")
+            amended = manager.handle_message("+15550000001", "options: Yes, No for 60 seconds")
+
+            self.assertIn("Send AMEND <details>", bare_amend.reply or "")
+            self.assertIn("Poll draft", amended.reply or "")
+            self.assertIn("Options: 1) Yes 2) No", amended.reply or "")
+            self.assertIn("Duration: 60s", amended.reply or "")
 
     def test_expired_poll_sends_creator_result(self) -> None:
         with TemporaryDirectory() as temp_dir:

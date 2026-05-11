@@ -257,6 +257,11 @@ def format_poll_draft(state: PollState) -> str:
     )
 
 
+def format_amend_help(state: PollState) -> str:
+    prefix = f"Poll needs {', '.join(state.missing)}. " if state.missing else ""
+    return clamp_sms_reply(f"{prefix}Send AMEND <details>, e.g. AMEND options: Yes, No for 60s.")
+
+
 def format_poll_started(state: PollState) -> str:
     return clamp_sms_reply(
         f"Poll started for {state.duration_seconds}s: {state.question} Reply {_format_options(state.options)}"
@@ -276,8 +281,9 @@ def parse_creator_command(message: str) -> tuple[str, str]:
         return "confirm", ""
     if lowered in CANCEL_WORDS:
         return "cancel", ""
-    if lowered.startswith("amend "):
-        return "amend", stripped[6:].strip()
+    amend = re.match(r"^amend\b\s*:?\s*(.*)$", stripped, re.I)
+    if amend:
+        return "amend", amend.group(1).strip()
     return "amend", stripped
 
 
