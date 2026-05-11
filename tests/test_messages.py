@@ -19,6 +19,7 @@ from sms_chatgpt.polls import (
     hash_msisdn,
     parse_duration_seconds,
     record_vote,
+    resolve_pending_vote,
 )
 from sms_chatgpt.sms import AdbSmsTransport
 from sms_chatgpt.worker import load_history, save_history, trim_history
@@ -192,6 +193,22 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(wall_decision.option, "Yes")
         self.assertEqual(ask_decision.kind, "ask")
 
+    def test_classifies_contextual_yes_no_vote_without_option_word(self) -> None:
+        state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll to build a school options: Yes, No for 60s")))
+
+        positive = classify_vote("build the school", state, "voter")
+        negative = classify_vote("building a school is not in my interest", state, "another-voter")
+        pending_number = resolve_pending_vote("1", "build the school", state, "number-voter")
+        pending_maybe = resolve_pending_vote("Maybe", "build the school", state, "maybe-voter")
+
+        self.assertEqual(positive.kind, "valid")
+        self.assertEqual(positive.option, "Yes")
+        self.assertEqual(negative.kind, "valid")
+        self.assertEqual(negative.option, "No")
+        self.assertEqual(pending_number.kind, "valid")
+        self.assertEqual(pending_number.option, "Yes")
+        self.assertEqual(pending_maybe.kind, "ask")
+
     def test_classifies_non_vote_as_ask(self) -> None:
         state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
 
@@ -340,7 +357,7 @@ class LocalPollManagerTest(unittest.TestCase):
                 "Create a poll on funding a local well options: Yes, No for 1 seconds",
             )
             manager.handle_message("+15550000001", "YES")
-            manager.handle_message("+15550000002", "1")
+            manager.handle_message("+15550000002", "Yes funding local well")
             creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
             state_path = manager._state_path(creator_hash)
             state = load_state(state_path)
@@ -374,8 +391,33 @@ class LocalPollManagerTest(unittest.TestCase):
             manager.handle_message("+15550000002", "YES")
 
             vote = manager.handle_message("+15550000003", "Yes")
+            clarified = manager.handle_message("+15550000003", "local well")
 
-            self.assertEqual(vote.reply, "Multiple polls match. Reply with a clearer vote.")
+            self.assertIn("Which poll is this vote for?", vote.reply or "")
+            self.assertEqual(clarified.reply, "Vote recorded: Yes.")
+
+    def test_contextless_vote_expires_without_context(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+            manager.handle_message("+15550000001", "poll to build a school options: Yes, No for 1 seconds")
+            manager.handle_message("+15550000001", "YES")
+
+            pending = manager.handle_message("+15550000002", "Maybe")
+            creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
+            state_path = manager._state_path(creator_hash)
+            state = load_state(state_path)
+            self.assertIsNotNone(state)
+            state.expires_at = 0
+            save_state(state_path, state)
+            late_context = manager.handle_message("+15550000002", "build the school")
+
+            self.assertIn("Which poll is this vote for?", pending.reply or "")
+            self.assertIn("pending vote expired", late_context.reply or "")
+            expired_state = load_state(state_path)
+            self.assertIsNotNone(expired_state)
+            self.assertEqual(expired_state.votes, {})
 
     def test_daemon_deletes_poll_state_only_after_result_sms_send(self) -> None:
         manager = _FakePollManager()

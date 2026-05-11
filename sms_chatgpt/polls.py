@@ -16,6 +16,7 @@ CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start"}
 CANCEL_WORDS = {"cancel", "stop"}
 YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve", "ndio", "naam"}
 NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject", "hapana", "la"}
+MAYBE_WORDS = {"maybe", "perhaps", "unsure", "not sure", "labda"}
 YES_OPTION_LABELS = {"yes", "y", "ndio", "naam"}
 NO_OPTION_LABELS = {"no", "n", "hapana", "la"}
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
@@ -230,6 +231,45 @@ def classify_vote(message: str, state: PollState, voter_hash: str) -> VoteDecisi
         if _looks_like_bad_vote(message):
             return VoteDecision("invalid", reply=_valid_vote_help(state.options))
         return VoteDecision("ask")
+    return _vote_decision_for_option(option, state, voter_hash)
+
+
+def resolve_pending_vote(
+    pending_message: str,
+    context_message: str,
+    state: PollState,
+    voter_hash: str,
+) -> VoteDecision:
+    option = _match_contextless_option(pending_message, state.options)
+    if option and has_vote_context(context_message, state.question):
+        return _vote_decision_for_option(option, state, voter_hash)
+    return VoteDecision("ask")
+
+
+def is_contextless_vote(message: str) -> bool:
+    normalized = _normalize(message)
+    return normalized.isdigit() or normalized in YES_WORDS or normalized in NO_WORDS or normalized in MAYBE_WORDS
+
+
+def has_vote_context(message: str, question: str | None) -> bool:
+    if not question:
+        return False
+    return bool(_context_tokens(message) & _context_tokens(question))
+
+
+def format_pending_vote_context_request() -> str:
+    return clamp_sms_reply("Which poll is this vote for? Reply with context, e.g. yes build the school.")
+
+
+def format_pending_vote_expired() -> str:
+    return clamp_sms_reply("That pending vote expired before context arrived.")
+
+
+def format_pending_vote_not_matched() -> str:
+    return clamp_sms_reply("I could not match that vote to an active poll. Reply with context like yes build the school.")
+
+
+def _vote_decision_for_option(option: str, state: PollState, voter_hash: str) -> VoteDecision:
     if voter_hash == state.creator_hash:
         return VoteDecision("invalid", reply="Poll creators cannot vote in their own poll.")
     if voter_hash in state.votes:
@@ -257,6 +297,11 @@ def match_vote_option(message: str, options: list[str], question: str | None = N
     if yes_option and phrase_vote == "yes":
         return yes_option
     if no_option and phrase_vote == "no":
+        return no_option
+    contextual_vote = _contextual_yes_no_vote_intent(message, question)
+    if yes_option and contextual_vote == "yes":
+        return yes_option
+    if no_option and contextual_vote == "no":
         return no_option
     return None
 
@@ -477,6 +522,23 @@ def _yes_no_options(options: list[str]) -> tuple[str | None, str | None]:
     return yes_option, no_option
 
 
+def _match_contextless_option(message: str, options: list[str]) -> str | None:
+    normalized = _normalize(message)
+    if normalized.isdigit():
+        index = int(normalized) - 1
+        if 0 <= index < len(options):
+            return options[index]
+    for option in options:
+        if normalized == _normalize(option):
+            return option
+    yes_option, no_option = _yes_no_options(options)
+    if yes_option and normalized in YES_WORDS:
+        return yes_option
+    if no_option and normalized in NO_WORDS:
+        return no_option
+    return None
+
+
 def _looks_like_bad_vote(message: str) -> bool:
     lowered = message.strip().lower()
     return lowered.startswith(("vote ", "voting ", "poll vote "))
@@ -504,6 +566,9 @@ def _yes_no_vote_intent(message: str) -> str | None:
         or "not favour" in normalized
         or "not approve" in normalized
         or "not agree" in normalized
+        or "not in my interest" in normalized
+        or "not interested" in normalized
+        or "no interest" in normalized
         or any(word in words for word in NEGATIVE_VOTE_WORDS)
     ):
         return "no"
@@ -515,6 +580,26 @@ def _yes_no_vote_intent(message: str) -> str | None:
     ):
         return "yes"
     return None
+
+
+def _contextual_yes_no_vote_intent(message: str, question: str | None) -> str | None:
+    if "?" in message or not has_vote_context(message, question):
+        return None
+    normalized = _normalize(message)
+    words = re.findall(r"[a-zA-Z']+", normalized)
+    if not words or len(words) > 12:
+        return None
+    if (
+        "do not" in normalized
+        or "don't" in normalized
+        or "dont" in normalized
+        or "not in my interest" in normalized
+        or "not interested" in normalized
+        or "no interest" in normalized
+        or any(word in words for word in NEGATIVE_VOTE_WORDS)
+    ):
+        return "no"
+    return "yes"
 
 
 def _vote_context_matches(message: str, question: str | None) -> bool:

@@ -17,13 +17,18 @@ from .polls import (
     confirm_poll,
     contains_poll_intent,
     format_amend_help,
+    format_pending_vote_context_request,
+    format_pending_vote_expired,
+    format_pending_vote_not_matched,
     format_poll_draft,
     format_poll_started,
+    is_contextless_vote,
     hash_msisdn,
     match_vote_option,
     merge_draft,
     parse_creator_command,
     record_vote,
+    resolve_pending_vote,
 )
 
 
@@ -40,6 +45,12 @@ class OutboundSms:
     poll_id: str | None = None
 
 
+@dataclass(frozen=True)
+class PendingVote:
+    message: str
+    poll_ids: tuple[str, ...]
+
+
 class LocalPollManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -50,6 +61,7 @@ class LocalPollManager:
             settings.openai_model,
         )
         self.creator_phones: dict[str, str] = {}
+        self.pending_votes: dict[str, PendingVote] = {}
 
     def handle_message(self, sender: str, body: str) -> PollResponse:
         sender_hash = hash_msisdn(sender, self.settings.poll_hash_salt)
@@ -87,6 +99,10 @@ class LocalPollManager:
             save_state(self._state_path(sender_hash), own)
             return PollResponse(True, format_poll_draft(own))
 
+        pending_response = self._handle_pending_vote_context(sender_hash, body, states)
+        if pending_response.handled:
+            return pending_response
+
         vote_response = self._handle_vote(sender_hash, body, states)
         if vote_response.handled:
             return vote_response
@@ -111,6 +127,7 @@ class LocalPollManager:
             state.result_reply = summarize_results(state, self.llm)
             save_state(self._state_path(creator_hash), state)
             outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply), creator_hash))
+        self._discard_closed_pending_votes()
         return outbound
 
     def ack_results_sent(self, outbound_messages: list[OutboundSms] | None = None) -> None:
@@ -124,6 +141,20 @@ class LocalPollManager:
             for creator_hash, state in states.items()
             if state.status == ACTIVE
         }
+        if is_contextless_vote(body):
+            eligible = {
+                creator_hash: state
+                for creator_hash, state in active_states.items()
+                if creator_hash != sender_hash and not state.is_expired() and sender_hash not in state.votes
+            }
+            if eligible:
+                self.pending_votes[sender_hash] = PendingVote(body, tuple(eligible))
+                return PollResponse(True, format_pending_vote_context_request())
+            if any(creator_hash == sender_hash for creator_hash in active_states):
+                return PollResponse(True, "Poll creators cannot vote in their own poll.")
+            if any(sender_hash in state.votes for state in active_states.values()):
+                return PollResponse(True, "Your vote has already been recorded.")
+
         other_matches: list[tuple[str, object, object]] = []
         own_match = None
         for creator_hash, state in active_states.items():
@@ -149,6 +180,61 @@ class LocalPollManager:
         if own_match:
             return PollResponse(True, "Poll creators cannot vote in their own poll.")
         return PollResponse(False)
+
+    def _handle_pending_vote_context(
+        self,
+        sender_hash: str,
+        body: str,
+        states: dict[str, PollState],
+    ) -> PollResponse:
+        pending = self.pending_votes.get(sender_hash)
+        if not pending:
+            return PollResponse(False)
+        active_candidates = {
+            creator_hash: states[creator_hash]
+            for creator_hash in pending.poll_ids
+            if (
+                creator_hash in states
+                and states[creator_hash].status == ACTIVE
+                and not states[creator_hash].is_expired()
+            )
+        }
+        if not active_candidates:
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(True, format_pending_vote_expired())
+        if is_contextless_vote(body):
+            self.pending_votes[sender_hash] = PendingVote(body, tuple(active_candidates))
+            return PollResponse(True, format_pending_vote_context_request())
+
+        matches: list[tuple[str, PollState, object]] = []
+        for creator_hash, state in active_candidates.items():
+            decision = resolve_pending_vote(pending.message, body, state, sender_hash)
+            if decision.kind != "ask":
+                matches.append((creator_hash, state, decision))
+
+        if len(matches) > 1:
+            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+        if len(matches) == 1:
+            creator_hash, state, decision = matches[0]
+            if decision.kind == "invalid":
+                self.pending_votes.pop(sender_hash, None)
+                return PollResponse(True, decision.reply)
+            state = record_vote(state, sender_hash, decision.option or "")
+            save_state(self._state_path(creator_hash), state)
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(True, decision.reply)
+        return PollResponse(True, format_pending_vote_not_matched())
+
+    def _discard_closed_pending_votes(self) -> None:
+        states = self._load_states()
+        for sender_hash, pending in list(self.pending_votes.items()):
+            if not any(
+                creator_hash in states
+                and states[creator_hash].status == ACTIVE
+                and not states[creator_hash].is_expired()
+                for creator_hash in pending.poll_ids
+            ):
+                self.pending_votes.pop(sender_hash, None)
 
     def _load_states(self) -> dict[str, PollState]:
         self.state_dir.mkdir(parents=True, exist_ok=True)

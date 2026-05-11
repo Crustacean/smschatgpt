@@ -48,7 +48,8 @@ flowchart LR
     openai -->|&lt;=140 char reply| workerA
     workerA -->|reply text| daemon
 
-    router -->|poll intent / creator command / vote| pollPod
+    router -->|poll intent / creator command / contextual vote| pollPod
+    router -.->|context-free vote waits for clarification| daemon
     daemon -->|create/read/list poll pods| pollPod
     daemon -->|exec draft/amend/confirm<br/>vote/status/finalize| pollWorker
     pollPod --- pollWorker
@@ -105,5 +106,6 @@ flowchart TD
 - Poll pods run the worker image and execute `python -m sms_chatgpt.poll_worker` for `draft`, `amend`, `confirm`, `vote`, `status`, and `finalize` actions.
 - Poll state is stored inside the poll pod at `POLL_STATE_FILE`. It stores the creator hash, question, options, duration, expiry, and votes keyed by voter hash, not raw voter MSISDNs.
 - The creator cannot vote in their own poll. Each voter hash can vote once per poll, and natural-language vote matching checks the vote text against the poll question context.
+- Context-free vote-like SMS such as `yes`, `no`, `1`, or `maybe` are held in the daemon as pending votes. The sender must provide context before the matched poll expires, otherwise the pending vote is discarded.
 - On each daemon loop, expired polls are finalized, anonymous aggregate counts are summarized through OpenAI, the result is sent only to the creator, and the poll pod is deleted after the send is acknowledged.
 - The daemon needs RBAC permissions for pods and `pods/exec` so it can create chat and poll pods, inspect their status, execute workers inside them, patch metadata, and delete them.

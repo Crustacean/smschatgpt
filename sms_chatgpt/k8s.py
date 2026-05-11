@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 from .config import Settings
 from .messages import clamp_sms_reply
-from .poll_manager import OutboundSms, PollResponse
+from .poll_manager import OutboundSms, PendingVote, PollResponse
 from .polls import (
     ACTIVE,
     CLOSED,
@@ -27,9 +27,14 @@ from .polls import (
     PollState,
     classify_vote,
     contains_poll_intent,
+    format_pending_vote_context_request,
+    format_pending_vote_expired,
+    format_pending_vote_not_matched,
     hash_msisdn,
+    is_contextless_vote,
     match_vote_option,
     parse_creator_command,
+    resolve_pending_vote,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -169,6 +174,7 @@ class PollPodManager:
         self.timeout_seconds = settings.chat_pod_timeout_seconds
         self._load_kube_config()
         self.core = client.CoreV1Api()
+        self.pending_votes: dict[str, PendingVote] = {}
 
     def handle_message(self, sender: str, body: str) -> PollResponse:
         sender_hash = hash_msisdn(sender, self.settings.poll_hash_salt)
@@ -199,6 +205,10 @@ class PollPodManager:
                 result = self._exec(own["pod_name"], "amend", "--message", body)
             return PollResponse(bool(result.get("handled", True)), result.get("reply"))
 
+        pending_response = self._handle_pending_vote_context(sender_hash, body, statuses)
+        if pending_response.handled:
+            return pending_response
+
         vote_response = self._handle_vote(sender_hash, body, statuses)
         if vote_response.handled:
             return vote_response
@@ -226,6 +236,7 @@ class PollPodManager:
             result = self._exec(pod_name, "finalize")
             if creator and result.get("reply"):
                 outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"]), pod_name))
+        self._discard_closed_pending_votes()
         return outbound
 
     def ack_results_sent(self, outbound_messages: list[OutboundSms] | None = None) -> None:
@@ -329,6 +340,32 @@ class PollPodManager:
             return {"exists": True}
 
     def _handle_vote(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
+        active_statuses = [
+            status
+            for status in statuses
+            if (status.get("state") or {}).get("status") == ACTIVE
+        ]
+        if is_contextless_vote(body):
+            eligible = [
+                status
+                for status in active_statuses
+                if (
+                    (status.get("state") or {}).get("creator_hash") != sender_hash
+                    and not PollState.from_dict(status.get("state") or {}).is_expired()
+                    and sender_hash not in ((status.get("state") or {}).get("votes") or {})
+                )
+            ]
+            if eligible:
+                self.pending_votes[sender_hash] = PendingVote(
+                    body,
+                    tuple(status["pod_name"] for status in eligible),
+                )
+                return PollResponse(True, format_pending_vote_context_request())
+            if any((status.get("state") or {}).get("creator_hash") == sender_hash for status in active_statuses):
+                return PollResponse(True, "Poll creators cannot vote in their own poll.")
+            if any(sender_hash in ((status.get("state") or {}).get("votes") or {}) for status in active_statuses):
+                return PollResponse(True, "Your vote has already been recorded.")
+
         other_matches: list[tuple[dict, PollState, object]] = []
         own_match = None
         for status in statuses:
@@ -357,6 +394,63 @@ class PollPodManager:
         if own_match:
             return PollResponse(True, "Poll creators cannot vote in their own poll.")
         return PollResponse(False)
+
+    def _handle_pending_vote_context(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
+        pending = self.pending_votes.get(sender_hash)
+        if not pending:
+            return PollResponse(False)
+        active_candidates = [
+            status
+            for status in statuses
+            if (
+                status.get("pod_name") in pending.poll_ids
+                and (status.get("state") or {}).get("status") == ACTIVE
+                and not PollState.from_dict(status.get("state") or {}).is_expired()
+            )
+        ]
+        if not active_candidates:
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(True, format_pending_vote_expired())
+        if is_contextless_vote(body):
+            self.pending_votes[sender_hash] = PendingVote(
+                body,
+                tuple(status["pod_name"] for status in active_candidates),
+            )
+            return PollResponse(True, format_pending_vote_context_request())
+
+        matches: list[tuple[dict, PollState, object]] = []
+        for status in active_candidates:
+            state = PollState.from_dict(status.get("state") or {})
+            decision = resolve_pending_vote(pending.message, body, state, sender_hash)
+            if decision.kind != "ask":
+                matches.append((status, state, decision))
+
+        if len(matches) > 1:
+            return PollResponse(True, "Multiple polls match. Reply with a clearer vote.")
+        if len(matches) == 1:
+            status, _state, decision = matches[0]
+            if decision.kind == "invalid":
+                self.pending_votes.pop(sender_hash, None)
+                return PollResponse(True, decision.reply)
+            result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", pending.message)
+            if result.get("route_to_chat"):
+                result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+        return PollResponse(True, format_pending_vote_not_matched())
+
+    def _discard_closed_pending_votes(self) -> None:
+        active_pod_names = {
+            status["pod_name"]
+            for status in self._statuses()
+            if (
+                (status.get("state") or {}).get("status") == ACTIVE
+                and not PollState.from_dict(status.get("state") or {}).is_expired()
+            )
+        }
+        for sender_hash, pending in list(self.pending_votes.items()):
+            if not active_pod_names.intersection(pending.poll_ids):
+                self.pending_votes.pop(sender_hash, None)
 
     @staticmethod
     def _own_status(statuses: list[dict], creator_hash: str) -> dict | None:
