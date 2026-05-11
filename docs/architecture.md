@@ -12,6 +12,8 @@ flowchart LR
     subgraph cluster[Kubernetes cluster]
         daemon[Daemon pod<br/>sms_chatgpt.daemon]
         router{Poll router}
+        pendingVotes[(pending vote cache<br/>sender hash -> vote + poll ids)]
+        localized[Localized poll replies<br/>English / Kiswahili]
         config[ConfigMap<br/>runtime settings]
         secret[Secret<br/>OPENAI_API_KEY<br/>POLL_HASH_SALT]
         rbac[RBAC<br/>pods + pods/exec]
@@ -49,12 +51,15 @@ flowchart LR
     workerA -->|reply text| daemon
 
     router -->|poll intent / creator command / contextual vote| pollPod
-    router -.->|context-free vote waits for clarification| daemon
+    router -.->|context-free vote<br/>yes / no / 1 / maybe| pendingVotes
+    pendingVotes -.->|clarifying context before expiry| router
     daemon -->|create/read/list poll pods| pollPod
     daemon -->|exec draft/amend/confirm<br/>vote/status/finalize| pollWorker
     pollPod --- pollWorker
     pollWorker <-->|load/save| pollState
-    pollWorker -->|draft extraction<br/>result summary| openai
+    pollState -->|stored creator language| localized
+    localized -->|draft / amend / start<br/>vote / close replies| daemon
+    pollWorker -->|draft extraction<br/>localized result summary| openai
     openai -->|poll draft/result text| pollWorker
     pollWorker -->|vote ack / draft / result| daemon
 
@@ -101,12 +106,13 @@ flowchart TD
 - Each sender maps to one Kubernetes chat pod, named from a sender hash.
 - Conversation memory is stored inside that sender's chat pod and disappears when the pod is deleted after `CHAT_POD_IDLE_SECONDS`.
 - When `POLL_ENABLED=true`, inbound SMS first passes through the poll router before falling back to the normal ChatGPT flow.
-- A poll request containing words such as `poll`, `vote`, or `voting` creates a per-creator poll pod named from `POLL_POD_NAME` plus the creator MSISDN hash prefix.
+- A poll request containing words such as `poll`, `vote`, or `voting`, or translated phrases such as Kiswahili `kura ya maoni`, creates a per-creator poll pod named from `POLL_POD_NAME` plus the creator MSISDN hash prefix. `POLL_KEYWORDS` can add more site-specific intent words or phrases.
 - Each creator hash can have one pending or active poll. Other MSISDNs can still create their own polls and vote in polls created by others.
 - Poll pods run the worker image and execute `python -m sms_chatgpt.poll_worker` for `draft`, `amend`, `confirm`, `vote`, `status`, and `finalize` actions.
 - Poll state is stored inside the poll pod at `POLL_STATE_FILE`. It stores the creator hash, question, options, duration, expiry, and votes keyed by voter hash, not raw voter MSISDNs.
-- Poll state also stores the language detected from the creator's original request. Draft, amend, start, vote, close, and result replies use that language, with English as the fallback.
+- Poll state also stores the language detected from the creator's original request. Draft, amend, start, vote, close, and result replies use that language, with English as the fallback. Final OpenAI result summaries are prompted to use the same language.
 - The creator cannot vote in their own poll. Each voter hash can vote once per poll, and natural-language vote matching checks the vote text against the poll question context.
-- Context-free vote-like SMS such as `yes`, `no`, `1`, or `maybe` are held in the daemon as pending votes. The sender must provide context before the matched poll expires, otherwise the pending vote is discarded.
+- Context-free vote-like SMS such as `yes`, `no`, `1`, or `maybe` are held in daemon memory as pending votes. The pending record stores the sender hash, the original vote-like text, the candidate poll ids, and the response language. The sender must provide context before the matched poll expires, otherwise the pending vote is discarded. If the daemon restarts, pending vote clarifications are lost, but recorded poll votes remain in poll pod state.
+- Contextual votes such as `yes build the school`, `build the school`, or `do not build the school` can be counted immediately when they match exactly one active poll.
 - On each daemon loop, expired polls are finalized, anonymous aggregate counts are summarized through OpenAI, the result is sent only to the creator, and the poll pod is deleted after the send is acknowledged.
 - The daemon needs RBAC permissions for pods and `pods/exec` so it can create chat and poll pods, inspect their status, execute workers inside them, patch metadata, and delete them.
