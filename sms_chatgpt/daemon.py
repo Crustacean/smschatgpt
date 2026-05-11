@@ -7,7 +7,7 @@ import time
 
 from .config import load_settings
 from .llm import build_llm_client
-from .messages import clamp_sms_reply
+from .messages import SMS_REPLY_LIMIT, SmsValidationError, clamp_sms_reply, inbound_validation_reply, validate_inbound_sms
 from .sms import AdbSmsTransport, AtModemSmsTransport, MockSmsTransport, SmsTransport
 
 LOGGER = logging.getLogger(__name__)
@@ -32,16 +32,19 @@ def main() -> None:
             for message in sms.receive_unread():
                 LOGGER.info("Received SMS from %s", message.sender)
                 try:
-                    poll_response = poll_manager.handle_message(message.sender, message.body) if poll_manager else None
+                    body = validate_inbound_sms(message.body, settings.sms_inbound_limit)
+                    poll_response = poll_manager.handle_message(message.sender, body) if poll_manager else None
                     if poll_response and poll_response.handled:
                         reply = poll_response.reply or ""
                     else:
-                        reply = chat_manager.ask(message.sender, message.body)
+                        reply = chat_manager.ask(message.sender, body)
+                except SmsValidationError as exc:
+                    reply = inbound_validation_reply(exc, settings.sms_reply_limit)
                 except Exception:
                     LOGGER.exception("Message handling failed for sender %s", message.sender)
                     reply = "Sorry, I could not answer right now."
                 if reply:
-                    sms.send_sms(message.sender, clamp_sms_reply(reply))
+                    sms.send_sms(message.sender, clamp_sms_reply(reply, settings.sms_reply_limit))
                 sms.ack(message)
             chat_manager.cleanup_idle_pods()
             _send_poll_results(poll_manager, sms)
@@ -52,13 +55,14 @@ def main() -> None:
 
 def _build_sms_transport(settings) -> SmsTransport:
     if settings.sms_backend == "mock":
-        return MockSmsTransport(settings.mock_inbox_file, settings.mock_outbox_file)
+        return MockSmsTransport(settings.mock_inbox_file, settings.mock_outbox_file, settings.sms_reply_limit)
     if settings.sms_backend == "at":
         return AtModemSmsTransport(
             settings.sms_serial_port,
             settings.sms_baudrate,
             settings.sms_message_status,
             settings.sms_storage,
+            settings.sms_reply_limit,
         )
     if settings.sms_backend == "adb":
         return AdbSmsTransport(
@@ -68,6 +72,7 @@ def _build_sms_transport(settings) -> SmsTransport:
             settings.adb_send_command_template,
             settings.adb_state_file,
             settings.adb_skip_existing,
+            settings.sms_reply_limit,
         )
     raise ValueError(f"Unsupported SMS_BACKEND={settings.sms_backend!r}")
 
@@ -102,18 +107,20 @@ def _send_poll_results(poll_manager, sms: SmsTransport) -> None:
     outbound_messages = poll_manager.close_expired()
     if not outbound_messages:
         return
+    reply_limit = getattr(getattr(poll_manager, "settings", None), "sms_reply_limit", None)
     for outbound in outbound_messages:
-        sms.send_sms(outbound.recipient, clamp_sms_reply(outbound.body))
+        sms.send_sms(outbound.recipient, clamp_sms_reply(outbound.body, reply_limit or SMS_REPLY_LIMIT))
     poll_manager.ack_results_sent(outbound_messages)
 
 
 class LocalChatManager:
     def __init__(self, settings) -> None:
         self.llm = build_llm_client(settings.llm_provider, settings.openai_api_key, settings.openai_model)
+        self.reply_limit = settings.sms_reply_limit
 
     def ask(self, sender: str, message: str) -> str:
         del sender
-        return self.llm.respond(message)
+        return self.llm.respond(message, reply_limit=self.reply_limit)
 
     def cleanup_idle_pods(self) -> None:
         return None

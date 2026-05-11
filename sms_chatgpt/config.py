@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .messages import SMS_INBOUND_LIMIT, SMS_REPLY_LIMIT
+
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:
@@ -18,6 +20,8 @@ class Settings:
     sms_poll_seconds: float
     sms_message_status: str
     sms_storage: str | None
+    sms_reply_limit: int
+    sms_inbound_limit: int
     adb_path: str
     adb_serial: str | None
     adb_send_mode: str
@@ -52,6 +56,8 @@ def load_settings() -> Settings:
         sms_poll_seconds=float(os.getenv("SMS_POLL_SECONDS", "5")),
         sms_message_status=os.getenv("SMS_MESSAGE_STATUS", "REC UNREAD"),
         sms_storage=os.getenv("SMS_STORAGE") or None,
+        sms_reply_limit=int(os.getenv("SMS_REPLY_LIMIT", str(SMS_REPLY_LIMIT))),
+        sms_inbound_limit=int(os.getenv("SMS_INBOUND_LIMIT", str(SMS_INBOUND_LIMIT))),
         adb_path=os.getenv("ADB_PATH", "adb"),
         adb_serial=os.getenv("ADB_SERIAL") or None,
         adb_send_mode=os.getenv("ADB_SEND_MODE", "compose").lower(),

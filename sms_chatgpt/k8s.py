@@ -83,7 +83,7 @@ class ChatPodManager:
             _request_timeout=self.timeout_seconds,
         )
         self._mark_active(pod_name)
-        return clamp_sms_reply(response)
+        return clamp_sms_reply(response, self.settings.sms_reply_limit)
 
     def cleanup_idle_pods(self) -> None:
         pods = self.core.list_namespaced_pod(
@@ -128,6 +128,8 @@ class ChatPodManager:
                             V1EnvVar(name="LLM_PROVIDER", value=self.settings.llm_provider),
                             V1EnvVar(name="OPENAI_API_KEY", value=self.settings.openai_api_key or ""),
                             V1EnvVar(name="OPENAI_MODEL", value=self.settings.openai_model),
+                            V1EnvVar(name="SMS_REPLY_LIMIT", value=str(self.settings.sms_reply_limit)),
+                            V1EnvVar(name="SMS_INBOUND_LIMIT", value=str(self.settings.sms_inbound_limit)),
                             V1EnvVar(name="CHAT_HISTORY_FILE", value=self.settings.chat_history_file),
                             V1EnvVar(name="CHAT_HISTORY_MAX_TURNS", value=str(self.settings.chat_history_max_turns)),
                         ],
@@ -244,13 +246,13 @@ class PollPodManager:
             creator = status.get("creator_phone")
             pod_name = status["pod_name"]
             if state.get("status") == CLOSED and state.get("result_reply") and creator:
-                outbound.append(OutboundSms(creator, clamp_sms_reply(state["result_reply"]), pod_name))
+                outbound.append(OutboundSms(creator, clamp_sms_reply(state["result_reply"], self.settings.sms_reply_limit), pod_name))
                 continue
             if not status.get("expired"):
                 continue
             result = self._exec(pod_name, "finalize")
             if creator and result.get("reply"):
-                outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"]), pod_name))
+                outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"], self.settings.sms_reply_limit), pod_name))
         self._discard_closed_pending_votes()
         return outbound
 
@@ -296,6 +298,8 @@ class PollPodManager:
                             V1EnvVar(name="LLM_PROVIDER", value=self.settings.llm_provider),
                             V1EnvVar(name="OPENAI_API_KEY", value=self.settings.openai_api_key or ""),
                             V1EnvVar(name="OPENAI_MODEL", value=self.settings.openai_model),
+                            V1EnvVar(name="SMS_REPLY_LIMIT", value=str(self.settings.sms_reply_limit)),
+                            V1EnvVar(name="SMS_INBOUND_LIMIT", value=str(self.settings.sms_inbound_limit)),
                             V1EnvVar(name="POLL_STATE_FILE", value=self.settings.poll_state_file),
                             V1EnvVar(name="POLL_HASH_SALT", value=self.settings.poll_hash_salt),
                         ],

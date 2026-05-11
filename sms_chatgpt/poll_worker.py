@@ -7,7 +7,7 @@ from typing import Any
 
 from .config import load_settings
 from .llm import EchoLlmClient, LlmClient, build_llm_client
-from .messages import clamp_sms_reply
+from .messages import SMS_REPLY_LIMIT, clamp_sms_reply, max_tokens_for_sms_limit, sms_response_instruction
 from .polls import (
     ACTIVE,
     CLOSED,
@@ -69,7 +69,7 @@ def main() -> None:
     elif args.action == "status":
         result = status_poll(state_path)
     elif args.action == "finalize":
-        result = finalize_poll(state_path, llm)
+        result = finalize_poll(state_path, llm, settings.sms_reply_limit)
     else:
         raise RuntimeError(f"Unsupported poll action: {args.action}")
 
@@ -150,13 +150,13 @@ def status_poll(path: Path) -> dict[str, Any]:
     return {"exists": True, "expired": state.is_expired(), "state": state.to_dict()}
 
 
-def finalize_poll(path: Path, llm: LlmClient) -> dict[str, Any]:
+def finalize_poll(path: Path, llm: LlmClient, reply_limit: int = SMS_REPLY_LIMIT) -> dict[str, Any]:
     state = load_state(path)
     if not state:
         return {"handled": False}
     if state.status == CLOSED and state.result_reply:
         return {"handled": True, "reply": state.result_reply, "state": state.to_dict()}
-    summary = summarize_results(state, llm)
+    summary = summarize_results(state, llm, reply_limit)
     state.status = CLOSED
     state.result_reply = summary
     save_state(path, state)
@@ -205,25 +205,26 @@ def extract_draft(message: str, llm: LlmClient) -> PollDraft:
     return fallback
 
 
-def summarize_results(state: PollState, llm: LlmClient) -> str:
+def summarize_results(state: PollState, llm: LlmClient, reply_limit: int = SMS_REPLY_LIMIT) -> str:
     counts = format_counts(state)
     language_name = "Kiswahili" if state.language == "sw" else "English"
     prompt = (
-        f"Summarize these anonymous SMS poll results in {language_name} in 140 characters or fewer. "
+        f"Summarize these anonymous SMS poll results in {language_name}. "
+        f"{sms_response_instruction(reply_limit)} "
         "Do not include voter identifiers. "
         f"{counts}"
     )
     try:
         response = llm.complete(
             [{"role": "user", "content": prompt}],
-            max_tokens=80,
+            max_tokens=max_tokens_for_sms_limit(reply_limit),
             temperature=0.2,
         )
         if response.strip() and "Summarize these anonymous SMS poll results" not in response:
-            return clamp_sms_reply(response)
+            return clamp_sms_reply(response, reply_limit)
     except Exception:
         pass
-    return counts
+    return clamp_sms_reply(counts, reply_limit)
 
 
 def _parse_draft_json(response: str) -> PollDraft | None:

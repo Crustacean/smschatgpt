@@ -8,6 +8,8 @@ data:
   SMS_SERIAL_PORT: "/dev/ttyUSB0"
   SMS_BAUDRATE: "115200"
   SMS_POLL_SECONDS: "5"
+  SMS_REPLY_LIMIT: "140"
+  SMS_INBOUND_LIMIT: "1000"
   ADB_PATH: "adb"
   ADB_SERVER_SOCKET: "tcp:host.minikube.internal:5037"
   ADB_SERIAL: ""

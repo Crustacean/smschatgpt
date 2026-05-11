@@ -133,14 +133,14 @@ class LocalPollManager:
             if not creator_phone:
                 continue
             if state.status == CLOSED and state.result_reply:
-                outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply), creator_hash))
+                outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply, self.settings.sms_reply_limit), creator_hash))
                 continue
             if not state.is_expired():
                 continue
             state.status = CLOSED
-            state.result_reply = summarize_results(state, self.llm)
+            state.result_reply = summarize_results(state, self.llm, self.settings.sms_reply_limit)
             save_state(self._state_path(creator_hash), state)
-            outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply), creator_hash))
+            outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply, self.settings.sms_reply_limit), creator_hash))
         self._discard_closed_pending_votes()
         return outbound
 

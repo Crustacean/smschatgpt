@@ -1,6 +1,6 @@
 # SMS ChatGPT
 
-`sms-chatgpt` is a Python daemon that watches SMS messages from an Android phone over ADB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are capped at 140 characters. Pods are deleted after 60 seconds of inactivity.
+`sms-chatgpt` is a Python daemon that watches SMS messages from an Android phone over ADB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are requested from the LLM within `SMS_REPLY_LIMIT` characters, default `140`, and safety-capped before sending. Pods are deleted after 60 seconds of inactivity.
 
 ## How It Works
 
@@ -8,9 +8,11 @@
 2. The daemon polls unread SMS messages.
 3. For each sender, it creates or reuses a Kubernetes pod named `sms-chat-<hash>`.
 4. The daemon runs `python -m sms_chatgpt.worker --message ...` inside that pod.
-5. The worker loads that pod's conversation history, calls the configured LLM, saves the new turn, and returns a <=140 character response.
+5. The worker loads that pod's conversation history, asks the configured LLM for a response within `SMS_REPLY_LIMIT`, saves the new turn, and returns the reply.
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
+
+Inbound SMS bodies are sanitized to remove control characters and rejected if they exceed `SMS_INBOUND_LIMIT`, default `1000`.
 
 ## SMS Polls
 
@@ -40,7 +42,7 @@ Each creator MSISDN hash can have one ongoing poll at a time. If the same creato
 
 While a poll is active, any sender except that poll's creator can vote once. Votes should include poll context, such as `yes build the school`, `build the school`, or `do not build the school`, so the daemon can match the vote to exactly one active poll. Context-free replies such as `yes`, `no`, `1`, or `maybe` are held as pending votes and the sender is asked for more context. If the matching poll expires before context arrives, the pending vote is discarded. The creator's vote in their own poll is rejected, but they can vote in other active polls. Duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match exactly one active poll continue through the normal ChatGPT flow.
 
-Poll state is stored in dedicated poll pods named with the `POLL_POD_NAME` prefix and the creator hash prefix. The state stores MSISDN hashes, not raw voter phone numbers. When a poll expires, the worker sends only anonymous aggregate counts to OpenAI for a <=140 character summary, sends that result to the creator, and deletes that poll pod.
+Poll state is stored in dedicated poll pods named with the `POLL_POD_NAME` prefix and the creator hash prefix. The state stores MSISDN hashes, not raw voter phone numbers. When a poll expires, the worker sends only anonymous aggregate counts to OpenAI for a summary within `SMS_REPLY_LIMIT`, sends that result to the creator, and deletes that poll pod.
 
 ## Important Android/ADB Note
 
@@ -135,7 +137,7 @@ Template variables:
 - `{adb}`: adb executable, shell-quoted.
 - `{serial_args}`: `-s <serial>` when `ADB_SERIAL` is set.
 - `{phone}`: destination number, shell-quoted.
-- `{body}`: reply body, shell-quoted and capped to 140 characters.
+- `{body}`: reply body, shell-quoted and capped to `SMS_REPLY_LIMIT` characters.
 
 For example, if your device has a helper command or app installed, the template might look like:
 

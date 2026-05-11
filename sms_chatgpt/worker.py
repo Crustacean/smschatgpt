@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import load_settings
 from .llm import build_llm_client
-from .messages import clamp_sms_reply
+from .messages import SmsValidationError, clamp_sms_reply, inbound_validation_reply, validate_inbound_sms
 
 
 def main() -> None:
@@ -16,15 +16,20 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = load_settings()
+    try:
+        message = validate_inbound_sms(args.message, settings.sms_inbound_limit)
+    except SmsValidationError as exc:
+        sys.stdout.write(inbound_validation_reply(exc, settings.sms_reply_limit))
+        return
     llm = build_llm_client(settings.llm_provider, settings.openai_api_key, settings.openai_model)
     history_file = Path(settings.chat_history_file)
     history = load_history(history_file, settings.chat_history_max_turns)
-    reply = clamp_sms_reply(llm.respond(args.message, history))
+    reply = clamp_sms_reply(llm.respond(message, history, settings.sms_reply_limit), settings.sms_reply_limit)
     save_history(
         history_file,
         [
             *history,
-            {"role": "user", "content": args.message},
+            {"role": "user", "content": message},
             {"role": "assistant", "content": reply},
         ],
         settings.chat_history_max_turns,

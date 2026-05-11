@@ -3,15 +3,20 @@ from __future__ import annotations
 import abc
 from collections.abc import Sequence
 
-from .messages import clamp_sms_reply
+from .messages import SMS_REPLY_LIMIT, clamp_sms_reply, max_tokens_for_sms_limit, sms_response_instruction
 
 ChatMessage = dict[str, str]
-SYSTEM_PROMPT = "Reply to SMS users in 140 characters or fewer. Be helpful and concise."
+SYSTEM_PROMPT = "Be helpful, concise, and SMS-ready."
 
 
 class LlmClient(abc.ABC):
     @abc.abstractmethod
-    def respond(self, message: str, history: Sequence[ChatMessage] | None = None) -> str:
+    def respond(
+        self,
+        message: str,
+        history: Sequence[ChatMessage] | None = None,
+        reply_limit: int = SMS_REPLY_LIMIT,
+    ) -> str:
         """Return a short answer for an SMS chat."""
 
     @abc.abstractmethod
@@ -25,9 +30,14 @@ class LlmClient(abc.ABC):
 
 
 class EchoLlmClient(LlmClient):
-    def respond(self, message: str, history: Sequence[ChatMessage] | None = None) -> str:
+    def respond(
+        self,
+        message: str,
+        history: Sequence[ChatMessage] | None = None,
+        reply_limit: int = SMS_REPLY_LIMIT,
+    ) -> str:
         del history
-        return clamp_sms_reply(f"Echo: {message}")
+        return clamp_sms_reply(f"Echo: {message}", reply_limit)
 
     def complete(
         self,
@@ -48,11 +58,21 @@ class OpenAiLlmClient(LlmClient):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def respond(self, message: str, history: Sequence[ChatMessage] | None = None) -> str:
-        messages: list[ChatMessage] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    def respond(
+        self,
+        message: str,
+        history: Sequence[ChatMessage] | None = None,
+        reply_limit: int = SMS_REPLY_LIMIT,
+    ) -> str:
+        messages: list[ChatMessage] = [
+            {"role": "system", "content": f"{SYSTEM_PROMPT} {sms_response_instruction(reply_limit)}"}
+        ]
         messages.extend(_valid_history(history or []))
         messages.append({"role": "user", "content": message})
-        return clamp_sms_reply(self.complete(messages, max_tokens=80, temperature=0.4))
+        return clamp_sms_reply(
+            self.complete(messages, max_tokens=max_tokens_for_sms_limit(reply_limit), temperature=0.4),
+            reply_limit,
+        )
 
     def complete(
         self,

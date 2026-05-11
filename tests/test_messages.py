@@ -5,7 +5,14 @@ from tempfile import TemporaryDirectory
 from sms_chatgpt.config import Settings
 from sms_chatgpt.daemon import _send_poll_results
 from sms_chatgpt.k8s import ChatPodManager, PollPodManager
-from sms_chatgpt.messages import SMS_REPLY_LIMIT, clamp_sms_reply
+from sms_chatgpt.llm import OpenAiLlmClient
+from sms_chatgpt.messages import (
+    SMS_REPLY_LIMIT,
+    SmsValidationError,
+    clamp_sms_reply,
+    max_tokens_for_sms_limit,
+    validate_inbound_sms,
+)
 from sms_chatgpt.poll_manager import LocalPollManager
 from sms_chatgpt.poll_worker import amend_poll, build_poll_llm, load_state, save_state
 from sms_chatgpt.polls import (
@@ -34,6 +41,31 @@ class ClampSmsReplyTest(unittest.TestCase):
 
         self.assertEqual(len(reply), SMS_REPLY_LIMIT)
         self.assertTrue(reply.endswith("..."))
+
+    def test_validate_inbound_sms_removes_control_chars(self) -> None:
+        self.assertEqual(validate_inbound_sms("hello\x00\nthere"), "hello there")
+
+    def test_validate_inbound_sms_rejects_oversized_messages(self) -> None:
+        with self.assertRaises(SmsValidationError):
+            validate_inbound_sms("x" * 11, limit=10)
+
+    def test_openai_chat_prompt_uses_reply_limit(self) -> None:
+        client = OpenAiLlmClient.__new__(OpenAiLlmClient)
+        captured = {}
+
+        def complete(messages, max_tokens=160, temperature=0.4):
+            captured["messages"] = messages
+            captured["max_tokens"] = max_tokens
+            captured["temperature"] = temperature
+            return "short reply"
+
+        client.complete = complete
+
+        reply = OpenAiLlmClient.respond(client, "hello", reply_limit=80)
+
+        self.assertEqual(reply, "short reply")
+        self.assertIn("80 characters or fewer", captured["messages"][0]["content"])
+        self.assertEqual(captured["max_tokens"], max_tokens_for_sms_limit(80))
 
 class AdbSmsTransportTest(unittest.TestCase):
     def test_parse_content_row_handles_commas_in_body(self) -> None:
@@ -502,6 +534,8 @@ def _settings(
         sms_poll_seconds=1,
         sms_message_status="REC UNREAD",
         sms_storage=None,
+        sms_reply_limit=140,
+        sms_inbound_limit=1000,
         adb_path="adb",
         adb_serial=None,
         adb_send_mode="log",
