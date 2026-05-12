@@ -7,20 +7,28 @@ flowchart LR
     sender[SMS sender phone]
     android[Android phone<br/>SIM + SMS inbox]
     host[Host laptop<br/>ADB server]
+    openai[OpenAI API]
 
     subgraph cluster[Kubernetes cluster]
         daemon[Daemon pod<br/>sms_chatgpt.daemon]
+        router{Poll router}
+        pendingVotes[(pending vote cache<br/>sender hash -> vote + poll ids)]
+        localized[Localized poll replies<br/>English / Kiswahili]
         config[ConfigMap<br/>runtime settings]
-        secret[Secret<br/>OPENAI_API_KEY]
+        secret[Secret<br/>OPENAI_API_KEY<br/>POLL_HASH_SALT]
         rbac[RBAC<br/>pods + pods/exec]
 
         subgraph sessions[Per-sender chat pods]
             workerA[chat pod<br/>sms-chat-&lt;sender-hash&gt;]
             history[(conversation history<br/>/tmp/sms-chatgpt-history.json)]
         end
-    end
 
-    openai[OpenAI API]
+        subgraph polls[Per-creator poll pods]
+            pollPod[poll pod<br/>sms-poll-active-&lt;creator-hash&gt;]
+            pollWorker[poll worker<br/>sms_chatgpt.poll_worker]
+            pollState[(poll state<br/>/tmp/sms-chatgpt-poll.json<br/>includes reply language)]
+        end
+    end
 
     sender -->|SMS| android
     android <-->|USB debugging| host
@@ -31,19 +39,36 @@ flowchart LR
     rbac --> daemon
 
     daemon -->|poll content://sms/inbox| host
-    daemon -->|create/reuse pod| workerA
-    daemon -->|kubectl exec<br/>python -m sms_chatgpt.worker| workerA
+    daemon -->|inbound SMS| router
+
+    router -->|normal ask| workerA
+    daemon -->|create/reuse chat pod| workerA
+    daemon -->|exec<br/>python -m sms_chatgpt.worker| workerA
 
     workerA <-->|load/save turns| history
     workerA -->|prompt + recent history| openai
     openai -->|&lt;=140 char reply| workerA
     workerA -->|reply text| daemon
 
+    router -->|poll intent / creator command / contextual vote| pollPod
+    router -.->|context-free vote<br/>yes / no / 1 / maybe| pendingVotes
+    pendingVotes -.->|clarifying context before expiry| router
+    daemon -->|create/read/list poll pods| pollPod
+    daemon -->|exec draft/amend/confirm<br/>vote/status/finalize| pollWorker
+    pollPod --- pollWorker
+    pollWorker <-->|load/save| pollState
+    pollState -->|stored creator language| localized
+    localized -->|draft / amend / start<br/>vote / close replies| daemon
+    pollWorker -->|draft extraction<br/>localized result summary| openai
+    openai -->|poll draft/result text| pollWorker
+    pollWorker -->|vote ack / draft / result| daemon
+
     daemon -->|ADB compose intent| host
     host -->|opens SMS composer| android
     android -->|tap Send / helper send| sender
 
     daemon -.->|delete after idle timeout| workerA
+    daemon -.->|delete after result sent| pollPod
 ```
 
 ## Deployment Flow
@@ -54,11 +79,11 @@ flowchart TD
     jenkins[Jenkins pipeline]
     tests[Unit tests]
     daemonImage[Daemon image<br/>Dockerfile.daemon]
-    workerImage[Worker image<br/>Dockerfile]
+    workerImage[Worker image<br/>Dockerfile<br/>chat + poll worker]
     registry[Docker Hub]
     manifests[Kubernetes manifests<br/>k8s/*.yaml]
     cluster[Kubernetes namespace<br/>sandbox/dev/uat/prod]
-    secret[OpenAI secret<br/>openai-api-key credential]
+    secret[Runtime secrets<br/>openai-api-key<br/>poll-hash-salt]
 
     repo --> jenkins
     jenkins --> tests
@@ -80,4 +105,16 @@ flowchart TD
 - The daemon pod reads inbound SMS over ADB and opens the SMS composer for outbound replies unless a device-specific silent-send template is configured.
 - Each sender maps to one Kubernetes chat pod, named from a sender hash.
 - Conversation memory is stored inside that sender's chat pod and disappears when the pod is deleted after `CHAT_POD_IDLE_SECONDS`.
-- The daemon needs RBAC permissions for pods and `pods/exec` so it can create chat pods and run the worker inside them.
+- When `POLL_ENABLED=true`, inbound SMS first passes through the poll router before falling back to the normal ChatGPT flow.
+- A poll request containing words such as `poll`, `vote`, or `voting`, or translated phrases such as Kiswahili `kura ya maoni`, creates a per-creator poll pod named from `POLL_POD_NAME` plus the creator MSISDN hash prefix. `POLL_KEYWORDS` can add more site-specific intent words or phrases.
+- Each creator hash can have one pending or active poll. Other MSISDNs can still create their own polls and vote in polls created by others.
+- Poll pods run the worker image and execute `python -m sms_chatgpt.poll_worker` for `draft`, `amend`, `confirm`, `vote`, `status`, `touch`, `timeout`, and `finalize` actions.
+- Poll state is stored inside the poll pod at `POLL_STATE_FILE`. It stores the creator hash, question, options, duration, expiry, last pending activity time, and votes keyed by voter hash, not raw voter MSISDNs.
+- Pending poll drafts are canceled after `POLL_PENDING_IDLE_SECONDS`, default `60`, without creator activity. The creator is notified in the poll creator's detected SMS language, and the poll pod/state is deleted only after that timeout notification is sent.
+- Poll state also stores the language detected from the creator's original request. Draft, amend, start, vote, close, and result replies use that language where local templates exist, with English as the fallback. OpenAI-extracted ISO language tags are preserved so final result summaries can be prompted in the creator's language.
+- The creator cannot vote in their own poll. Each voter hash can vote once per poll, and natural-language vote matching checks the vote text against the poll question context, including supported cross-language context aliases.
+- Context-free vote-like SMS such as `yes`, `sí`, `oui`, `no`, `não`, `1`, or `maybe` are held in daemon memory as pending votes. The pending record stores the sender hash, the original vote-like text, the candidate poll ids, and the response language. The sender must provide context before the matched poll expires, otherwise the pending vote is discarded. If the daemon restarts, pending vote clarifications are lost, but recorded poll votes remain in poll pod state.
+- Contextual votes such as `yes build the school`, `build the school`, `do not build the school`, or `ninakubali kujenga maktaba ya shule` can be counted immediately when they match exactly one active poll.
+- Deterministic vote matching runs first. If it cannot classify a contextual vote and OpenAI is configured, the poll manager asks the model to return strict JSON that identifies whether the SMS semantically matches the poll, the exact option label, and the vote SMS language. The same fallback can tag standalone vote fragments in other languages as context-free pending votes. This allows vote matching across a broader set of OpenAI-supported languages while still rejecting ambiguous or unrelated messages.
+- On each daemon loop, expired polls are finalized, anonymous aggregate counts are summarized through OpenAI, the result is sent only to the creator, and the poll pod is deleted after the send is acknowledged.
+- The daemon needs RBAC permissions for pods and `pods/exec` so it can create chat and poll pods, inspect their status, execute workers inside them, patch metadata, and delete them.

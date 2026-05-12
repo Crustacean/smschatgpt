@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 sms-chatgpt-daemon = "sms_chatgpt.daemon:main"
 sms-chatgpt-worker = "sms_chatgpt.worker:main"
+sms-chatgpt-poll-worker = "sms_chatgpt.poll_worker:main"
 sms-chatgpt-diagnose-modem = "sms_chatgpt.diagnose_modem:main"
 sms-chatgpt-diagnose-adb = "sms_chatgpt.diagnose_adb:main"
 

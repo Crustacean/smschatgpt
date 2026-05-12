@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import json
 import logging
 import time
 
@@ -17,8 +19,42 @@ except ModuleNotFoundError:
 
 from .config import Settings
 from .messages import clamp_sms_reply
+from .poll_manager import OutboundSms, PendingVote, PollResponse
+from .poll_worker import (
+    build_poll_llm,
+    classify_vote_with_llm,
+    is_contextless_vote_with_llm,
+    resolve_pending_vote_with_llm,
+)
+from .polls import (
+    ACTIVE,
+    CLOSED,
+    PENDING,
+    PollState,
+    classify_vote,
+    contains_poll_intent,
+    format_creator_cannot_vote,
+    format_duplicate_vote,
+    format_multiple_polls,
+    format_ongoing_poll,
+    format_pending_vote_context_request_for_language,
+    format_pending_vote_expired,
+    format_pending_vote_not_matched,
+    format_poll_closed,
+    format_poll_not_open,
+    hash_msisdn,
+    is_contextless_vote,
+    language_for_states,
+    match_vote_option,
+    parse_creator_command,
+    resolve_pending_vote,
+)
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _language_for_statuses(statuses: list[dict]) -> str:
+    return language_for_states([PollState.from_dict(status.get("state") or {}) for status in statuses])
 
 
 class ChatPodManager:
@@ -53,7 +89,7 @@ class ChatPodManager:
             _request_timeout=self.timeout_seconds,
         )
         self._mark_active(pod_name)
-        return clamp_sms_reply(response)
+        return clamp_sms_reply(response, self.settings.sms_reply_limit)
 
     def cleanup_idle_pods(self) -> None:
         pods = self.core.list_namespaced_pod(
@@ -98,6 +134,8 @@ class ChatPodManager:
                             V1EnvVar(name="LLM_PROVIDER", value=self.settings.llm_provider),
                             V1EnvVar(name="OPENAI_API_KEY", value=self.settings.openai_api_key or ""),
                             V1EnvVar(name="OPENAI_MODEL", value=self.settings.openai_model),
+                            V1EnvVar(name="SMS_REPLY_LIMIT", value=str(self.settings.sms_reply_limit)),
+                            V1EnvVar(name="SMS_INBOUND_LIMIT", value=str(self.settings.sms_inbound_limit)),
                             V1EnvVar(name="CHAT_HISTORY_FILE", value=self.settings.chat_history_file),
                             V1EnvVar(name="CHAT_HISTORY_MAX_TURNS", value=str(self.settings.chat_history_max_turns)),
                         ],
@@ -132,6 +170,414 @@ class ChatPodManager:
     @staticmethod
     def _sender_hash(sender: str) -> str:
         return hashlib.sha256(sender.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _load_kube_config() -> None:
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
+
+
+class PollPodManager:
+    worker_command = ["python", "-m", "sms_chatgpt.poll_worker"]
+    creator_annotation = "sms-chatgpt/creator-msisdn"
+    creator_hash_annotation = "sms-chatgpt/creator-hash"
+    label_selector = "app=sms-chatgpt-poll,managed-by=sms-chatgpt-daemon"
+
+    def __init__(self, settings: Settings) -> None:
+        if client is None or config is None or stream is None:
+            raise RuntimeError("The kubernetes package is required when SESSION_BACKEND=kubernetes")
+        self.settings = settings
+        self.namespace = settings.kubernetes_namespace
+        self.timeout_seconds = settings.chat_pod_timeout_seconds
+        self._load_kube_config()
+        self.core = client.CoreV1Api()
+        self.pending_votes: dict[str, PendingVote] = {}
+        self.llm = build_poll_llm(settings.llm_provider, settings.openai_api_key, settings.openai_model)
+
+    def handle_message(self, sender: str, body: str) -> PollResponse:
+        sender_hash = hash_msisdn(sender, self.settings.poll_hash_salt)
+        statuses = self._statuses()
+        own = self._own_status(statuses, sender_hash)
+
+        if contains_poll_intent(body, self.settings.poll_keywords):
+            if own and (own.get("state") or {}).get("status") in {PENDING, ACTIVE, CLOSED}:
+                if (own.get("state") or {}).get("status") == PENDING:
+                    self._exec(own["pod_name"], "touch")
+                return PollResponse(True, format_ongoing_poll((own.get("state") or {}).get("language", "en")))
+            pod_name = self._pod_name(sender_hash)
+            self._ensure_pod(pod_name, sender, sender_hash)
+            result = self._exec(pod_name, "draft", "--creator-hash", sender_hash, "--message", body)
+            return PollResponse(True, result.get("reply"))
+
+        if own and (own.get("state") or {}).get("status") == PENDING:
+            command, _details = parse_creator_command(body)
+            if command == "confirm":
+                result = self._exec(own["pod_name"], "confirm")
+            elif command == "cancel":
+                result = self._exec(own["pod_name"], "cancel")
+                self._delete_pod(own["pod_name"])
+            elif body.strip().lower().startswith("amend "):
+                result = self._exec(own["pod_name"], "amend", "--message", body)
+            else:
+                vote_response = self._handle_vote(sender_hash, body, statuses)
+                if vote_response.handled:
+                    return vote_response
+                result = self._exec(own["pod_name"], "amend", "--message", body)
+            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+
+        pending_response = self._handle_pending_vote_context(sender_hash, body, statuses)
+        if pending_response.handled:
+            return pending_response
+
+        vote_response = self._handle_vote(sender_hash, body, statuses)
+        if vote_response.handled:
+            return vote_response
+
+        pending_matches = [
+            PollState.from_dict(item.get("state") or {})
+            for item in statuses
+            if (
+                (item.get("state") or {}).get("status") == PENDING
+                and match_vote_option(body, (item.get("state") or {}).get("options") or [], (item.get("state") or {}).get("question"))
+            )
+        ]
+        if pending_matches:
+            return PollResponse(True, format_poll_not_open(language_for_states(pending_matches)))
+
+        return PollResponse(False)
+
+    def close_expired(self) -> list[OutboundSms]:
+        outbound: list[OutboundSms] = []
+        for status in self._statuses():
+            state = status.get("state") or {}
+            creator = status.get("creator_phone")
+            pod_name = status["pod_name"]
+            if state.get("status") == CLOSED and state.get("result_reply") and creator:
+                outbound.append(OutboundSms(creator, clamp_sms_reply(state["result_reply"], self.settings.sms_reply_limit), pod_name))
+                continue
+            if not status.get("expired"):
+                continue
+            if state.get("status") == PENDING:
+                result = self._exec(pod_name, "timeout")
+            else:
+                result = self._exec(pod_name, "finalize")
+            if creator and result.get("reply"):
+                outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"], self.settings.sms_reply_limit), pod_name))
+        self._discard_closed_pending_votes()
+        return outbound
+
+    def ack_results_sent(self, outbound_messages: list[OutboundSms] | None = None) -> None:
+        for outbound in outbound_messages or []:
+            if outbound.poll_id:
+                self._delete_pod(outbound.poll_id)
+
+    def _ensure_pod(self, pod_name: str, creator_phone: str, creator_hash: str) -> None:
+        try:
+            existing = self.core.read_namespaced_pod(pod_name, self.namespace)
+            if existing.metadata.deletion_timestamp or existing.status.phase in {"Failed", "Succeeded"}:
+                self._delete_pod(pod_name)
+                self._wait_until_deleted(pod_name)
+            else:
+                return
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        pod = V1Pod(
+            metadata=V1ObjectMeta(
+                name=pod_name,
+                labels={
+                    "app": "sms-chatgpt-poll",
+                    "managed-by": "sms-chatgpt-daemon",
+                    "creator": creator_hash[:16],
+                },
+                annotations={
+                    self.creator_annotation: creator_phone,
+                    self.creator_hash_annotation: creator_hash,
+                    "sms-chatgpt/last-active": str(int(time.time())),
+                },
+            ),
+            spec=V1PodSpec(
+                restart_policy="Never",
+                containers=[
+                    V1Container(
+                        name="poll",
+                        image=self.settings.chat_pod_image,
+                        command=["sleep", "3600"],
+                        env=[
+                            V1EnvVar(name="LLM_PROVIDER", value=self.settings.llm_provider),
+                            V1EnvVar(name="OPENAI_API_KEY", value=self.settings.openai_api_key or ""),
+                            V1EnvVar(name="OPENAI_MODEL", value=self.settings.openai_model),
+                            V1EnvVar(name="SMS_REPLY_LIMIT", value=str(self.settings.sms_reply_limit)),
+                            V1EnvVar(name="SMS_INBOUND_LIMIT", value=str(self.settings.sms_inbound_limit)),
+                            V1EnvVar(name="POLL_STATE_FILE", value=self.settings.poll_state_file),
+                            V1EnvVar(name="POLL_HASH_SALT", value=self.settings.poll_hash_salt),
+                            V1EnvVar(
+                                name="POLL_PENDING_IDLE_SECONDS",
+                                value=str(self.settings.poll_pending_idle_seconds),
+                            ),
+                        ],
+                    )
+                ],
+            ),
+        )
+        LOGGER.info("Creating poll pod %s", pod_name)
+        self.core.create_namespaced_pod(self.namespace, pod)
+        self._wait_until_running(pod_name)
+
+    def _exec(self, pod_name: str, *args: str) -> dict:
+        self._wait_until_running(pod_name)
+        command = [*self.worker_command, *args]
+        LOGGER.info("Executing poll worker action %s", args[0] if args else "")
+        response = stream.stream(
+            self.core.connect_get_namespaced_pod_exec,
+            pod_name,
+            self.namespace,
+            command=command,
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+            _request_timeout=self.timeout_seconds,
+        )
+        return self._parse_worker_response(response)
+
+    def _statuses(self) -> list[dict]:
+        pods = self.core.list_namespaced_pod(namespace=self.namespace, label_selector=self.label_selector)
+        statuses: list[dict] = []
+        for pod in pods.items:
+            status = self._status(pod.metadata.name)
+            if status.get("exists"):
+                status["pod_name"] = pod.metadata.name
+                status["creator_phone"] = (pod.metadata.annotations or {}).get(self.creator_annotation)
+                status["creator_hash"] = (pod.metadata.annotations or {}).get(self.creator_hash_annotation)
+                statuses.append(status)
+        return statuses
+
+    def _status(self, pod_name: str) -> dict:
+        try:
+            pod = self.core.read_namespaced_pod(pod_name, self.namespace)
+        except ApiException as exc:
+            if exc.status == 404:
+                return {"exists": False}
+            raise
+        if pod.metadata.deletion_timestamp or pod.status.phase in {"Failed", "Succeeded"}:
+            LOGGER.info("Removing inactive poll pod %s in phase %s", pod_name, pod.status.phase)
+            self._delete_pod(pod_name)
+            self._wait_until_deleted(pod_name)
+            return {"exists": False}
+        try:
+            return self._exec(pod_name, "status")
+        except Exception:
+            LOGGER.exception("Failed to read poll status for %s", pod_name)
+            return {"exists": True}
+
+    def _handle_vote(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
+        active_statuses = [
+            status
+            for status in statuses
+            if (status.get("state") or {}).get("status") == ACTIVE
+        ]
+        if is_contextless_vote(body) or (
+            active_statuses and is_contextless_vote_with_llm(body, self.llm)
+        ):
+            eligible = [
+                status
+                for status in active_statuses
+                if (
+                    (status.get("state") or {}).get("creator_hash") != sender_hash
+                    and not PollState.from_dict(status.get("state") or {}).is_expired()
+                    and sender_hash not in ((status.get("state") or {}).get("votes") or {})
+                )
+            ]
+            if eligible:
+                language = language_for_states([PollState.from_dict(status.get("state") or {}) for status in eligible])
+                self.pending_votes[sender_hash] = PendingVote(
+                    body,
+                    tuple(status["pod_name"] for status in eligible),
+                    language,
+                )
+                return PollResponse(True, format_pending_vote_context_request_for_language(language))
+            if any((status.get("state") or {}).get("creator_hash") == sender_hash for status in active_statuses):
+                return PollResponse(True, format_creator_cannot_vote(_language_for_statuses(active_statuses)))
+            if any(sender_hash in ((status.get("state") or {}).get("votes") or {}) for status in active_statuses):
+                return PollResponse(True, format_duplicate_vote(_language_for_statuses(active_statuses)))
+
+        other_matches: list[tuple[dict, PollState, object]] = []
+        own_match = None
+        for status in statuses:
+            state_data = status.get("state") or {}
+            if state_data.get("status") != ACTIVE:
+                continue
+            state = PollState.from_dict(state_data)
+            decision = classify_vote(body, state, sender_hash)
+            if decision.kind == "ask":
+                decision = classify_vote_with_llm(body, state, sender_hash, self.llm)
+            if decision.kind == "ask":
+                continue
+            if state.creator_hash == sender_hash:
+                own_match = (status, state, decision)
+            else:
+                other_matches.append((status, state, decision))
+
+        if len(other_matches) > 1:
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in other_matches])))
+        if len(other_matches) == 1:
+            status, state, decision = other_matches[0]
+            if state.is_expired():
+                return PollResponse(True, format_poll_closed(state.language))
+            if decision.kind == "invalid":
+                return PollResponse(True, decision.reply)
+            result = self._exec(
+                status["pod_name"],
+                "vote",
+                "--voter-hash",
+                sender_hash,
+                "--message",
+                body,
+                "--force-option",
+                decision.option or "",
+            )
+            if result.get("route_to_chat"):
+                return PollResponse(False)
+            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+        if own_match:
+            return PollResponse(True, format_creator_cannot_vote(own_match[1].language))
+        return PollResponse(False)
+
+    def _handle_pending_vote_context(self, sender_hash: str, body: str, statuses: list[dict]) -> PollResponse:
+        pending = self.pending_votes.get(sender_hash)
+        if not pending:
+            return PollResponse(False)
+        active_candidates = [
+            status
+            for status in statuses
+            if (
+                status.get("pod_name") in pending.poll_ids
+                and (status.get("state") or {}).get("status") == ACTIVE
+                and not PollState.from_dict(status.get("state") or {}).is_expired()
+            )
+        ]
+        if not active_candidates:
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(True, format_pending_vote_expired(pending.language))
+        if is_contextless_vote(body):
+            language = _language_for_statuses(active_candidates)
+            self.pending_votes[sender_hash] = PendingVote(
+                body,
+                tuple(status["pod_name"] for status in active_candidates),
+                language,
+            )
+            return PollResponse(True, format_pending_vote_context_request_for_language(language))
+
+        matches: list[tuple[dict, PollState, object]] = []
+        for status in active_candidates:
+            state = PollState.from_dict(status.get("state") or {})
+            decision = resolve_pending_vote(pending.message, body, state, sender_hash)
+            if decision.kind == "ask":
+                decision = resolve_pending_vote_with_llm(pending.message, body, state, sender_hash, self.llm)
+            if decision.kind != "ask":
+                matches.append((status, state, decision))
+
+        if len(matches) > 1:
+            return PollResponse(True, format_multiple_polls(language_for_states([item[1] for item in matches])))
+        if len(matches) == 1:
+            status, _state, decision = matches[0]
+            if decision.kind == "invalid":
+                self.pending_votes.pop(sender_hash, None)
+                return PollResponse(True, decision.reply)
+            result = self._exec(
+                status["pod_name"],
+                "vote",
+                "--voter-hash",
+                sender_hash,
+                "--message",
+                pending.message,
+                "--force-option",
+                decision.option or "",
+            )
+            if result.get("route_to_chat"):
+                result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
+            self.pending_votes.pop(sender_hash, None)
+            return PollResponse(bool(result.get("handled", True)), result.get("reply"))
+        return PollResponse(True, format_pending_vote_not_matched(_language_for_statuses(active_candidates)))
+
+    def _discard_closed_pending_votes(self) -> None:
+        active_pod_names = {
+            status["pod_name"]
+            for status in self._statuses()
+            if (
+                (status.get("state") or {}).get("status") == ACTIVE
+                and not PollState.from_dict(status.get("state") or {}).is_expired()
+            )
+        }
+        for sender_hash, pending in list(self.pending_votes.items()):
+            if not active_pod_names.intersection(pending.poll_ids):
+                self.pending_votes.pop(sender_hash, None)
+
+    @staticmethod
+    def _own_status(statuses: list[dict], creator_hash: str) -> dict | None:
+        for status in statuses:
+            state = status.get("state") or {}
+            if state.get("creator_hash") == creator_hash or status.get("creator_hash") == creator_hash:
+                return status
+        return None
+
+    def _wait_until_running(self, pod_name: str) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            pod = self.core.read_namespaced_pod(pod_name, self.namespace)
+            if pod.status.phase == "Running":
+                return
+            if pod.status.phase in {"Failed", "Succeeded"}:
+                raise RuntimeError(f"Pod {pod_name} ended before it could handle poll")
+            time.sleep(1)
+        raise TimeoutError(f"Timed out waiting for pod {pod_name} to run")
+
+    def _delete_pod(self, pod_name: str) -> None:
+        try:
+            self.core.delete_namespaced_pod(pod_name, self.namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _pod_name(self, creator_hash: str) -> str:
+        base = self.settings.poll_pod_name[:46].rstrip("-")
+        return f"{base}-{creator_hash[:16]}"
+
+    @staticmethod
+    def _parse_worker_response(response: str) -> dict:
+        text = (response or "{}").strip()
+        candidates = [text]
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end > start:
+            candidates.append(text[start : end + 1])
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except (SyntaxError, ValueError):
+                    continue
+            if isinstance(parsed, dict):
+                return parsed
+        raise RuntimeError(f"Poll worker returned unparseable output: {response}")
+
+    def _wait_until_deleted(self, pod_name: str) -> None:
+        deadline = time.monotonic() + self.timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                self.core.read_namespaced_pod(pod_name, self.namespace)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            time.sleep(1)
+        raise TimeoutError(f"Timed out waiting for pod {pod_name} to delete")
 
     @staticmethod
     def _load_kube_config() -> None:

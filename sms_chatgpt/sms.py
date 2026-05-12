@@ -9,7 +9,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .messages import SmsMessage, clamp_sms_reply
+from .messages import SMS_REPLY_LIMIT, SmsMessage, clamp_sms_reply
 
 LOGGER = logging.getLogger(__name__)
 
@@ -28,9 +28,10 @@ class SmsTransport(abc.ABC):
 
 
 class MockSmsTransport(SmsTransport):
-    def __init__(self, inbox_file: str, outbox_file: str) -> None:
+    def __init__(self, inbox_file: str, outbox_file: str, reply_limit: int = SMS_REPLY_LIMIT) -> None:
         self.inbox = Path(inbox_file)
         self.outbox = Path(outbox_file)
+        self.reply_limit = reply_limit
         self.inbox.touch(exist_ok=True)
         self.outbox.touch(exist_ok=True)
 
@@ -49,7 +50,7 @@ class MockSmsTransport(SmsTransport):
         return messages
 
     def send_sms(self, phone_number: str, body: str) -> None:
-        body = clamp_sms_reply(body)
+        body = clamp_sms_reply(body, self.reply_limit)
         with self.outbox.open("a", encoding="utf-8") as handle:
             handle.write(f"{phone_number}|{body}{os.linesep}")
 
@@ -66,6 +67,7 @@ class AdbSmsTransport(SmsTransport):
         send_command_template: str | None = None,
         state_file: str = "./adb-sms-state.txt",
         skip_existing: bool = True,
+        reply_limit: int = SMS_REPLY_LIMIT,
     ) -> None:
         self.adb_path = adb_path
         self.serial = serial
@@ -73,6 +75,7 @@ class AdbSmsTransport(SmsTransport):
         self.send_command_template = send_command_template
         self.state_file = Path(state_file)
         self.skip_existing = skip_existing
+        self.reply_limit = reply_limit
         self.last_processed_id = self._load_last_processed_id()
         try:
             self._run_adb(["get-state"])
@@ -116,7 +119,7 @@ class AdbSmsTransport(SmsTransport):
         return sorted(rows, key=lambda message: message.index or 0)
 
     def send_sms(self, phone_number: str, body: str) -> None:
-        body = clamp_sms_reply(body)
+        body = clamp_sms_reply(body, self.reply_limit)
         if self.send_mode == "log":
             LOGGER.warning("ADB SMS reply for %s: %s", phone_number, body)
             return
@@ -266,10 +269,12 @@ class AtModemSmsTransport(SmsTransport):
         baudrate: int,
         message_status: str = "REC UNREAD",
         storage: str | None = None,
+        reply_limit: int = SMS_REPLY_LIMIT,
     ) -> None:
         import serial
 
         self.message_status = message_status
+        self.reply_limit = reply_limit
         self.serial = serial.Serial(port=port, baudrate=baudrate, timeout=2)
         self._command("AT")
         self._command("ATE0")
@@ -306,7 +311,7 @@ class AtModemSmsTransport(SmsTransport):
         return messages
 
     def send_sms(self, phone_number: str, body: str) -> None:
-        body = clamp_sms_reply(body)
+        body = clamp_sms_reply(body, self.reply_limit)
         self.serial.reset_input_buffer()
         self.serial.write(f'AT+CMGS="{phone_number}"\r'.encode("utf-8"))
         time.sleep(1)

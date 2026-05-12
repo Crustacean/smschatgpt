@@ -1,6 +1,6 @@
 # SMS ChatGPT
 
-`sms-chatgpt` is a Python daemon that watches SMS messages from an Android phone over ADB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are capped at 140 characters. Pods are deleted after 60 seconds of inactivity.
+`sms-chatgpt` is a Python daemon that watches SMS messages from an Android phone over ADB. Each sender gets an isolated Kubernetes pod. The daemon sends the incoming text into that pod, the pod asks an LLM for a reply, and the daemon sends the reply back by SMS. Replies are requested from the LLM within `SMS_REPLY_LIMIT` characters, default `140`, and safety-capped before sending. Pods are deleted after 60 seconds of inactivity.
 
 ## How It Works
 
@@ -8,9 +8,43 @@
 2. The daemon polls unread SMS messages.
 3. For each sender, it creates or reuses a Kubernetes pod named `sms-chat-<hash>`.
 4. The daemon runs `python -m sms_chatgpt.worker --message ...` inside that pod.
-5. The worker loads that pod's conversation history, calls the configured LLM, saves the new turn, and returns a <=140 character response.
+5. The worker loads that pod's conversation history, asks the configured LLM for a response within `SMS_REPLY_LIMIT`, saves the new turn, and returns the reply.
 6. The daemon sends the response by SMS.
 7. A cleanup loop deletes pods that have been idle for more than `CHAT_POD_IDLE_SECONDS`.
+
+Inbound SMS bodies are sanitized to remove control characters and rejected if they exceed `SMS_INBOUND_LIMIT`, default `1000`.
+
+## SMS Polls
+
+When `POLL_ENABLED=true`, inbound messages containing poll intent phrases start the poll flow instead of the normal chat flow. English keywords such as `poll`, `vote`, and `voting` are supported, along with built-in translated phrases such as Kiswahili `kura ya maoni`. `POLL_KEYWORDS` can add more site-specific words or phrases.
+
+Example creator SMS:
+
+```text
+Create a Yes or No poll on funding to dig a local well for 60 seconds
+```
+
+Kiswahili-style creator SMS are also accepted when the intent, duration, and choices are clear:
+
+```text
+Tengeneza kura ya maoni kujenga au kutojenga maktaba ya jamii kwa sekunde 90
+```
+
+The daemon creates a pending poll and replies with a draft. The creator can then reply:
+
+- `YES`, `CONFIRM`, `OK`, `APPROVE`, or `START` to open the poll.
+- `AMEND <new wording/options/duration>` to revise it.
+- `CANCEL` to discard it.
+
+If the draft is waiting for missing details or confirmation and the creator does not respond within `POLL_PENDING_IDLE_SECONDS`, default `60`, the pending poll is canceled, the creator is notified in the poll creator's detected SMS language, and the poll pod/state is deleted after that notification is sent.
+
+Poll system replies use the language detected from the creator's original poll request. For example, a Kiswahili poll request receives Kiswahili draft, amend, start, vote, close, and result replies. When OpenAI extracts the poll draft, the ISO language tag is preserved so final summaries can be prompted in that language.
+
+Each creator MSISDN hash can have one ongoing poll at a time. If the same creator asks for another poll before their current poll closes, they receive `You have an ongoing poll.` or its localized equivalent. Other MSISDNs can still create their own polls while responding to polls created by someone else.
+
+While a poll is active, any sender except that poll's creator can vote once. Votes should include poll context, such as `yes build the school`, `build the school`, `do not build the school`, or Kiswahili context like `ninakubali kujenga maktaba ya shule`, so the daemon can match the vote to exactly one active poll even when the vote language differs from the poll language. Deterministic matching handles known words first; when OpenAI is configured, an LLM fallback classifies vote intent and poll context across other supported languages. Context-free replies such as `yes`, `sí`, `oui`, `no`, `não`, `1`, or `maybe` are held as pending votes and the sender is asked for more context; OpenAI can also tag standalone vote fragments in other languages as pending votes. If the matching poll expires before context arrives, the pending vote is discarded. The creator's vote in their own poll is rejected, but they can vote in other active polls. Duplicate votes from the same MSISDN hash keep the first vote. Messages that do not match exactly one active poll continue through the normal ChatGPT flow.
+
+Poll state is stored in dedicated poll pods named with the `POLL_POD_NAME` prefix and the creator hash prefix. The state stores MSISDN hashes, not raw voter phone numbers. When a poll expires, the worker sends only anonymous aggregate counts to OpenAI for a summary within `SMS_REPLY_LIMIT`, sends that result to the creator, and deletes that poll pod.
 
 ## Important Android/ADB Note
 
@@ -105,7 +139,7 @@ Template variables:
 - `{adb}`: adb executable, shell-quoted.
 - `{serial_args}`: `-s <serial>` when `ADB_SERIAL` is set.
 - `{phone}`: destination number, shell-quoted.
-- `{body}`: reply body, shell-quoted and capped to 140 characters.
+- `{body}`: reply body, shell-quoted and capped to `SMS_REPLY_LIMIT` characters.
 
 For example, if your device has a helper command or app installed, the template might look like:
 
@@ -141,6 +175,8 @@ For a local cluster such as kind or minikube, load the image into the cluster or
 The daemon needs permission to create, list, patch, exec into, and delete pods in `KUBERNETES_NAMESPACE`.
 
 Each per-sender pod stores conversation context in `CHAT_HISTORY_FILE` and keeps the most recent `CHAT_HISTORY_MAX_TURNS` user/assistant turns. That history lives only as long as the pod; increase `CHAT_POD_IDLE_SECONDS` if SMS follow-ups should keep context for longer than the default 60 seconds.
+
+Polls use the same worker image for a dedicated poll pod. Set `POLL_HASH_SALT` as a Kubernetes Secret so MSISDN hashes are stable but not reversible from repo configuration.
 
 Example minimal role:
 
@@ -188,6 +224,7 @@ Before running the Jenkins job, update `IMAGE_REPOSITORY` in `Jenkinsfile`, then
 - `docker-registry-credentials`: username/password or token for your container registry.
 - `kubeconfig`: kubeconfig file for your cluster.
 - `openai-api-key`: secret text containing your OpenAI API key.
+- `poll-hash-salt`: secret text used to hash voter MSISDNs.
 
 ## AT Modem Alternative
 

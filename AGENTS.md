@@ -15,11 +15,11 @@
   printf '+15551234567|hello there\n' >> mock-inbox.txt
   SMS_BACKEND=mock SESSION_BACKEND=local LLM_PROVIDER=echo sms-chatgpt-daemon
   ```
-- ADB diagnostics:
+- Smoke-test the poll worker without OpenAI:
   ```bash
-  adb devices -l
-  python3 -m sms_chatgpt.diagnose_adb
+  POLL_HASH_SALT=test-salt LLM_PROVIDER=echo sms-chatgpt-poll-worker draft --creator-hash creator --message "poll on well options: Yes, No for 60 seconds"
   ```
+- ADB diagnostics: `adb devices -l` and `python3 -m sms_chatgpt.diagnose_adb`.
 - Build images:
   ```bash
   docker build -f Dockerfile.daemon -t sms-chatgpt-daemon:latest .
@@ -32,7 +32,7 @@
   ```bash
   python3 -m unittest discover -s tests
   ```
-- Representative tests live in `tests/test_messages.py` and cover SMS reply clamping, ADB row parsing, ADB state files, worker command selection, and worker history persistence.
+- Representative tests live in `tests/test_messages.py` and cover SMS reply clamping, ADB parsing/state, worker history, poll intent, duration parsing, vote matching, duplicate voting, creator vote rejection, result delivery, and cleanup after send.
 - For worker smoke tests without OpenAI:
   ```bash
   LLM_PROVIDER=echo python3 -m sms_chatgpt.worker --message hello
@@ -44,12 +44,17 @@
 - Preserve the 140-character SMS reply contract through `clamp_sms_reply`.
 - Prefer environment-driven configuration in `sms_chatgpt/config.py` and document new settings in `.env.example`.
 - Keep optional heavy dependencies lazy where practical, as done for `kubernetes`, `openai`, and `dotenv`.
-- Worker containers should continue to support `python -m sms_chatgpt.worker`.
+- Worker containers should continue to support `python -m sms_chatgpt.worker` and `python -m sms_chatgpt.poll_worker`.
+- Keep pure poll logic in `sms_chatgpt/polls.py`, pod-local poll actions in `sms_chatgpt/poll_worker.py`, and local/Kubernetes orchestration in `poll_manager.py` and `k8s.py`.
+- Poll replies must also be clamped with `clamp_sms_reply`.
 
 ## Review Guidelines
 
 - Check for committed secrets, especially `.env`, OpenAI keys, and generated SMS state files.
+- Verify `POLL_HASH_SALT` comes from secrets and poll state does not store raw voter MSISDNs.
 - Verify Kubernetes RBAC still grants only namespace-scoped permissions needed for pods and `pods/exec`.
 - For ADB changes, confirm both mock/local mode and the Android ADB path are still understandable from the README.
 - For chat behavior changes, check that conversation history remains per-sender and is lost when the idle pod is deleted.
+- For poll behavior changes, check creator vote rejection, first-valid-vote-wins, ChatGPT fallback for non-matching SMS, no guessing on ambiguous votes, and result delivery before poll pod deletion.
+- When changing chat or poll architecture, update `README.md` and `docs/architecture.md`.
 - Before approving deploy-related changes, run tests and inspect `Dockerfile`, `Dockerfile.daemon`, `Jenkinsfile`, and `k8s/*.yaml` for consistency.

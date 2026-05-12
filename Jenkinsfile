@@ -10,6 +10,7 @@ pipeline {
 
         DOCKER_CREDENTIALS = 'docker-hub-credentials'
         OPENAI_API_KEY_CREDENTIALS = 'openai-api-key'
+        POLL_HASH_SALT_CREDENTIALS = 'poll-hash-salt'
 
         KUBE_CA_CERT = 'minikube-ca-cert'
         KUBE_CLUSTER = 'minikube'
@@ -132,7 +133,10 @@ def deployToKubernetes() {
     env.DAEMON_IMAGE = "${env.DAEMON_IMAGE_NAME}:${env.IMAGE_TAG}"
     env.WORKER_IMAGE = "${env.WORKER_IMAGE_NAME}:${env.IMAGE_TAG}"
 
-    withCredentials([string(credentialsId: env.OPENAI_API_KEY_CREDENTIALS, variable: 'OPENAI_API_KEY')]) {
+    withCredentials([
+        string(credentialsId: env.OPENAI_API_KEY_CREDENTIALS, variable: 'OPENAI_API_KEY'),
+        string(credentialsId: env.POLL_HASH_SALT_CREDENTIALS, variable: 'POLL_HASH_SALT')
+    ]) {
         withKubeConfig(
             caCertificateId: env.KUBE_CA_CERT,
             clusterName: env.KUBE_CLUSTER,
@@ -148,7 +152,7 @@ def deployToKubernetes() {
             sh 'envsubst < k8s/configmap.yaml > prepared-configmap.yaml'
             sh 'envsubst < k8s/deployment.yaml > prepared-deploy.yaml'
             sh 'kubectl apply -f prepared-namespace.yaml'
-            sh 'kubectl -n ${KUBE_NAMESPACE} create secret generic sms-chatgpt-secrets --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY}" --dry-run=client -o yaml | kubectl apply -f -'
+            sh 'kubectl -n ${KUBE_NAMESPACE} create secret generic sms-chatgpt-secrets --from-literal=OPENAI_API_KEY="${OPENAI_API_KEY}" --from-literal=POLL_HASH_SALT="${POLL_HASH_SALT}" --dry-run=client -o yaml | kubectl apply -f -'
             sh 'kubectl apply -f prepared-rbac.yaml'
             sh 'kubectl apply -f prepared-configmap.yaml'
             sh 'kubectl apply -f prepared-deploy.yaml'
