@@ -28,5 +28,6 @@ data:
   POLL_KEYWORDS: "poll,vote,voting"
   POLL_STATE_FILE: "/tmp/sms-chatgpt-poll.json"
   POLL_POD_NAME: "sms-poll-active"
+  POLL_PENDING_IDLE_SECONDS: "60"
   LLM_PROVIDER: "openai"
   OPENAI_MODEL: "gpt-4o-mini"

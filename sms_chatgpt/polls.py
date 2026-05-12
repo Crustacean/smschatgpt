@@ -213,6 +213,7 @@ class PollState:
     created_at: int
     start_time: int | None = None
     expires_at: int | None = None
+    last_activity_at: int | None = None
     votes: dict[str, str] = field(default_factory=dict)
     result_reply: str | None = None
     language: str = DEFAULT_LANGUAGE
@@ -230,6 +231,11 @@ class PollState:
             created_at=int(data.get("created_at", int(time.time()))),
             start_time=int(data["start_time"]) if data.get("start_time") is not None else None,
             expires_at=int(data["expires_at"]) if data.get("expires_at") is not None else None,
+            last_activity_at=(
+                int(data["last_activity_at"])
+                if data.get("last_activity_at") is not None
+                else int(data.get("created_at", int(time.time())))
+            ),
             votes={str(key): str(value) for key, value in data.get("votes", {}).items()},
             result_reply=str(data["result_reply"]) if data.get("result_reply") is not None else None,
             language=_normalize_language(str(data.get("language", DEFAULT_LANGUAGE))),
@@ -244,6 +250,12 @@ class PollState:
 
     def is_expired(self, now: int | None = None) -> bool:
         return self.status == ACTIVE and self.expires_at is not None and (now or int(time.time())) >= self.expires_at
+
+    def is_pending_idle_expired(self, timeout_seconds: int, now: int | None = None) -> bool:
+        if self.status != PENDING or timeout_seconds <= 0:
+            return False
+        activity = self.last_activity_at if self.last_activity_at is not None else self.created_at
+        return (now or int(time.time())) - activity >= timeout_seconds
 
 
 @dataclass(frozen=True)
@@ -305,6 +317,7 @@ def merge_draft(current: PollState, draft: PollDraft) -> PollState:
         created_at=current.created_at,
         start_time=current.start_time,
         expires_at=current.expires_at,
+        last_activity_at=int(time.time()) if current.status == PENDING else current.last_activity_at,
         votes=current.votes,
         result_reply=current.result_reply,
         language=current.language,
@@ -312,13 +325,15 @@ def merge_draft(current: PollState, draft: PollDraft) -> PollState:
 
 
 def build_pending_poll(creator_hash: str, draft: PollDraft) -> PollState:
+    created_at = int(time.time())
     return PollState(
         status=PENDING,
         creator_hash=creator_hash,
         question=draft.question,
         options=draft.options,
         duration_seconds=draft.duration_seconds,
-        created_at=int(time.time()),
+        created_at=created_at,
+        last_activity_at=created_at,
         language=_normalize_language(draft.language),
     )
 
@@ -336,7 +351,27 @@ def confirm_poll(state: PollState, now: int | None = None) -> PollState:
         created_at=state.created_at,
         start_time=started,
         expires_at=started + int(state.duration_seconds or 0),
+        last_activity_at=started,
         votes=state.votes,
+        language=state.language,
+    )
+
+
+def touch_pending_poll(state: PollState, now: int | None = None) -> PollState:
+    if state.status != PENDING:
+        return state
+    return PollState(
+        status=state.status,
+        creator_hash=state.creator_hash,
+        question=state.question,
+        options=state.options,
+        duration_seconds=state.duration_seconds,
+        created_at=state.created_at,
+        start_time=state.start_time,
+        expires_at=state.expires_at,
+        last_activity_at=now if now is not None else int(time.time()),
+        votes=state.votes,
+        result_reply=state.result_reply,
         language=state.language,
     )
 
@@ -411,6 +446,12 @@ def format_poll_canceled(language: str = DEFAULT_LANGUAGE) -> str:
     if _is_swahili(language):
         return "Kura imeghairiwa."
     return "Poll canceled."
+
+
+def format_pending_poll_timed_out(language: str = DEFAULT_LANGUAGE) -> str:
+    if _is_swahili(language):
+        return clamp_sms_reply("Kura imesubiri maelezo muda mrefu na imeghairiwa.")
+    return clamp_sms_reply("Poll waited too long for more details and was canceled.")
 
 
 def format_poll_not_open(language: str = DEFAULT_LANGUAGE) -> str:
@@ -515,6 +556,7 @@ def record_vote(state: PollState, voter_hash: str, option: str) -> PollState:
         created_at=state.created_at,
         start_time=state.start_time,
         expires_at=state.expires_at,
+        last_activity_at=state.last_activity_at,
         votes=votes,
         result_reply=state.result_reply,
         language=state.language,

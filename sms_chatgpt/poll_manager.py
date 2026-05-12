@@ -30,6 +30,7 @@ from .polls import (
     format_duplicate_vote,
     format_multiple_polls,
     format_ongoing_poll,
+    format_pending_poll_timed_out,
     format_pending_vote_context_request_for_language,
     format_pending_vote_expired,
     format_pending_vote_not_matched,
@@ -46,6 +47,7 @@ from .polls import (
     parse_creator_command,
     record_vote,
     resolve_pending_vote,
+    touch_pending_poll,
 )
 
 
@@ -88,6 +90,9 @@ class LocalPollManager:
 
         if contains_poll_intent(body, self.settings.poll_keywords):
             if own and own.status in {PENDING, ACTIVE, CLOSED}:
+                if own.status == PENDING:
+                    own = touch_pending_poll(own)
+                    save_state(self._state_path(sender_hash), own)
                 return PollResponse(True, format_ongoing_poll(own.language))
             draft = extract_draft(body, self.llm)
             state = build_pending_poll(sender_hash, draft)
@@ -99,6 +104,8 @@ class LocalPollManager:
             command, details = parse_creator_command(body)
             if command == "confirm":
                 if own.missing:
+                    own = touch_pending_poll(own)
+                    save_state(self._state_path(sender_hash), own)
                     return PollResponse(True, format_poll_draft(own))
                 own = confirm_poll(own)
                 save_state(self._state_path(sender_hash), own)
@@ -107,6 +114,8 @@ class LocalPollManager:
                 self._delete_state(sender_hash)
                 return PollResponse(True, format_poll_canceled(own.language))
             if command == "amend" and not details:
+                own = touch_pending_poll(own)
+                save_state(self._state_path(sender_hash), own)
                 return PollResponse(True, format_amend_help(own))
             if not body.strip().lower().startswith("amend"):
                 vote_response = self._handle_vote(sender_hash, body, states)
@@ -142,6 +151,12 @@ class LocalPollManager:
             if not creator_phone:
                 continue
             if state.status == CLOSED and state.result_reply:
+                outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply, self.settings.sms_reply_limit), creator_hash))
+                continue
+            if state.is_pending_idle_expired(self.settings.poll_pending_idle_seconds):
+                state.status = CLOSED
+                state.result_reply = format_pending_poll_timed_out(state.language)
+                save_state(self._state_path(creator_hash), state)
                 outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply, self.settings.sms_reply_limit), creator_hash))
                 continue
             if not state.is_expired():

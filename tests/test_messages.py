@@ -22,6 +22,8 @@ from sms_chatgpt.poll_worker import (
     load_state,
     resolve_pending_vote_with_llm,
     save_state,
+    status_poll,
+    timeout_pending_poll,
 )
 from sms_chatgpt.polls import (
     build_pending_poll,
@@ -384,6 +386,22 @@ class PollsTest(unittest.TestCase):
             self.assertIsNotNone(saved)
             self.assertIn("fund digging", saved.question)
 
+    def test_pending_poll_status_expires_after_idle_timeout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "poll.json"
+            state = build_pending_poll("creator", extract_draft_from_text("poll to fund digging of a well"))
+            state.last_activity_at = 0
+            save_state(state_path, state)
+
+            status = status_poll(state_path, pending_idle_seconds=60)
+            result = timeout_pending_poll(state_path)
+            saved = load_state(state_path)
+
+            self.assertTrue(status["expired"])
+            self.assertIn("waited too long", result["reply"])
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved.status, CLOSED)
+
 
 class LocalPollManagerTest(unittest.TestCase):
     def test_poll_flow_and_chat_fallback(self) -> None:
@@ -439,6 +457,28 @@ class LocalPollManagerTest(unittest.TestCase):
 
             self.assertTrue(draft.handled)
             self.assertIn("Poll needs options, duration", draft.reply or "")
+
+    def test_pending_poll_timeout_notifies_creator_then_deletes_state(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file, poll_pending_idle_seconds=60)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message("+15550000001", "poll to fund digging of a well")
+            creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
+            state_path = manager._state_path(creator_hash)
+            state = load_state(state_path)
+            self.assertIsNotNone(state)
+            state.last_activity_at = 0
+            save_state(state_path, state)
+
+            outbound = manager.close_expired()
+
+            self.assertEqual(outbound[0].recipient, "+15550000001")
+            self.assertIn("waited too long", outbound[0].body)
+            self.assertIsNotNone(load_state(state_path))
+            manager.ack_results_sent(outbound)
+            self.assertIsNone(load_state(state_path))
 
     def test_swahili_poll_request_starts_poll_flow_without_llm(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -704,6 +744,7 @@ def _settings(
     poll_state_file: Path,
     llm_provider: str = "echo",
     openai_api_key: str | None = None,
+    poll_pending_idle_seconds: int = 60,
 ) -> Settings:
     return Settings(
         sms_backend="mock",
@@ -732,6 +773,7 @@ def _settings(
         poll_state_file=str(poll_state_file),
         poll_pod_name="sms-poll-active",
         poll_hash_salt="test-salt",
+        poll_pending_idle_seconds=poll_pending_idle_seconds,
         llm_provider=llm_provider,
         openai_api_key=openai_api_key,
         openai_model="gpt-4o-mini",

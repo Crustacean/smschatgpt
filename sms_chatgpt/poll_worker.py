@@ -11,6 +11,7 @@ from .messages import SMS_REPLY_LIMIT, clamp_sms_reply, max_tokens_for_sms_limit
 from .polls import (
     ACTIVE,
     CLOSED,
+    PENDING,
     PollDraft,
     PollState,
     VoteDecision,
@@ -21,6 +22,7 @@ from .polls import (
     format_counts,
     format_amend_help,
     format_invalid_vote,
+    format_pending_poll_timed_out,
     format_poll_canceled,
     format_poll_closed,
     format_poll_draft,
@@ -31,6 +33,7 @@ from .polls import (
     parse_creator_command,
     record_vote,
     resolve_pending_vote,
+    touch_pending_poll,
     vote_decision_for_option,
 )
 
@@ -56,6 +59,8 @@ def main() -> None:
 
     subparsers.add_parser("status")
     subparsers.add_parser("finalize")
+    subparsers.add_parser("timeout")
+    subparsers.add_parser("touch")
 
     args = parser.parse_args()
     settings = load_settings()
@@ -73,9 +78,13 @@ def main() -> None:
     elif args.action == "vote":
         result = vote_poll(state_path, args.voter_hash, args.message, llm, args.force_option)
     elif args.action == "status":
-        result = status_poll(state_path)
+        result = status_poll(state_path, settings.poll_pending_idle_seconds)
     elif args.action == "finalize":
         result = finalize_poll(state_path, llm, settings.sms_reply_limit)
+    elif args.action == "timeout":
+        result = timeout_pending_poll(state_path)
+    elif args.action == "touch":
+        result = touch_poll(state_path)
     else:
         raise RuntimeError(f"Unsupported poll action: {args.action}")
 
@@ -104,6 +113,8 @@ def amend_poll(path: Path, message: str, llm: LlmClient) -> dict[str, Any]:
     if command == "cancel":
         return cancel_poll(path)
     if command == "amend" and not details:
+        state = touch_pending_poll(state)
+        save_state(path, state)
         return {"handled": True, "reply": format_amend_help(state), "state": state.to_dict()}
     draft = extract_draft(details, llm)
     state = merge_draft(state, draft)
@@ -116,6 +127,8 @@ def confirm_pending_poll(path: Path) -> dict[str, Any]:
     if not state:
         return {"handled": False, "route_to_chat": True}
     if state.missing:
+        state = touch_pending_poll(state)
+        save_state(path, state)
         return {"handled": True, "reply": format_poll_draft(state), "state": state.to_dict()}
     state = confirm_poll(state)
     save_state(path, state)
@@ -129,6 +142,15 @@ def cancel_poll(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         pass
     return {"handled": True, "reply": format_poll_canceled(state.language if state else "en")}
+
+
+def touch_poll(path: Path) -> dict[str, Any]:
+    state = load_state(path)
+    if not state:
+        return {"handled": False}
+    state = touch_pending_poll(state)
+    save_state(path, state)
+    return {"handled": True, "state": state.to_dict()}
 
 
 def vote_poll(
@@ -256,11 +278,29 @@ def infer_vote_option_with_llm(
     return match_vote_option(raw_option, state.options)
 
 
-def status_poll(path: Path) -> dict[str, Any]:
+def status_poll(path: Path, pending_idle_seconds: int = 0) -> dict[str, Any]:
     state = load_state(path)
     if not state:
         return {"exists": False}
-    return {"exists": True, "expired": state.is_expired(), "state": state.to_dict()}
+    return {
+        "exists": True,
+        "expired": state.is_expired() or state.is_pending_idle_expired(pending_idle_seconds),
+        "state": state.to_dict(),
+    }
+
+
+def timeout_pending_poll(path: Path) -> dict[str, Any]:
+    state = load_state(path)
+    if not state:
+        return {"handled": False}
+    if state.status == CLOSED and state.result_reply:
+        return {"handled": True, "reply": state.result_reply, "state": state.to_dict()}
+    if state.status != PENDING:
+        return {"handled": False, "state": state.to_dict()}
+    state.status = CLOSED
+    state.result_reply = format_pending_poll_timed_out(state.language)
+    save_state(path, state)
+    return {"handled": True, "reply": state.result_reply, "state": state.to_dict()}
 
 
 def finalize_poll(path: Path, llm: LlmClient, reply_limit: int = SMS_REPLY_LIMIT) -> dict[str, Any]:

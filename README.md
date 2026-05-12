@@ -36,6 +36,8 @@ The daemon creates a pending poll and replies with a draft. The creator can then
 - `AMEND <new wording/options/duration>` to revise it.
 - `CANCEL` to discard it.
 
+If the draft is waiting for missing details or confirmation and the creator does not respond within `POLL_PENDING_IDLE_SECONDS`, default `60`, the pending poll is canceled, the creator is notified, and the poll pod/state is deleted after that notification is sent.
+
 Poll system replies use the language detected from the creator's original poll request. For example, a Kiswahili poll request receives Kiswahili draft, amend, start, vote, close, and result replies. When OpenAI extracts the poll draft, the ISO language tag is preserved so final summaries can be prompted in that language.
 
 Each creator MSISDN hash can have one ongoing poll at a time. If the same creator asks for another poll before their current poll closes, they receive `You have an ongoing poll.` or its localized equivalent. Other MSISDNs can still create their own polls while responding to polls created by someone else.

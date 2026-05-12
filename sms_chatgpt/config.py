@@ -40,6 +40,7 @@ class Settings:
     poll_state_file: str
     poll_pod_name: str
     poll_hash_salt: str
+    poll_pending_idle_seconds: int
     llm_provider: str
     openai_api_key: str | None
     openai_model: str
@@ -80,6 +81,7 @@ def load_settings() -> Settings:
         poll_state_file=os.getenv("POLL_STATE_FILE", "/tmp/sms-chatgpt-poll.json"),
         poll_pod_name=os.getenv("POLL_POD_NAME", "sms-poll-active"),
         poll_hash_salt=os.getenv("POLL_HASH_SALT", "dev-only-insecure-poll-salt"),
+        poll_pending_idle_seconds=int(os.getenv("POLL_PENDING_IDLE_SECONDS", "60")),
         llm_provider=os.getenv("LLM_PROVIDER", "openai").lower(),
         openai_api_key=os.getenv("OPENAI_API_KEY") or None,
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),

@@ -203,6 +203,8 @@ class PollPodManager:
 
         if contains_poll_intent(body, self.settings.poll_keywords):
             if own and (own.get("state") or {}).get("status") in {PENDING, ACTIVE, CLOSED}:
+                if (own.get("state") or {}).get("status") == PENDING:
+                    self._exec(own["pod_name"], "touch")
                 return PollResponse(True, format_ongoing_poll((own.get("state") or {}).get("language", "en")))
             pod_name = self._pod_name(sender_hash)
             self._ensure_pod(pod_name, sender, sender_hash)
@@ -257,7 +259,10 @@ class PollPodManager:
                 continue
             if not status.get("expired"):
                 continue
-            result = self._exec(pod_name, "finalize")
+            if state.get("status") == PENDING:
+                result = self._exec(pod_name, "timeout")
+            else:
+                result = self._exec(pod_name, "finalize")
             if creator and result.get("reply"):
                 outbound.append(OutboundSms(creator, clamp_sms_reply(result["reply"], self.settings.sms_reply_limit), pod_name))
         self._discard_closed_pending_votes()
@@ -309,6 +314,10 @@ class PollPodManager:
                             V1EnvVar(name="SMS_INBOUND_LIMIT", value=str(self.settings.sms_inbound_limit)),
                             V1EnvVar(name="POLL_STATE_FILE", value=self.settings.poll_state_file),
                             V1EnvVar(name="POLL_HASH_SALT", value=self.settings.poll_hash_salt),
+                            V1EnvVar(
+                                name="POLL_PENDING_IDLE_SECONDS",
+                                value=str(self.settings.poll_pending_idle_seconds),
+                            ),
                         ],
                     )
                 ],
