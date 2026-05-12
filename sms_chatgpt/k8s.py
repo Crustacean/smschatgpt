@@ -20,6 +20,12 @@ except ModuleNotFoundError:
 from .config import Settings
 from .messages import clamp_sms_reply
 from .poll_manager import OutboundSms, PendingVote, PollResponse
+from .poll_worker import (
+    build_poll_llm,
+    classify_vote_with_llm,
+    is_contextless_vote_with_llm,
+    resolve_pending_vote_with_llm,
+)
 from .polls import (
     ACTIVE,
     CLOSED,
@@ -188,6 +194,7 @@ class PollPodManager:
         self._load_kube_config()
         self.core = client.CoreV1Api()
         self.pending_votes: dict[str, PendingVote] = {}
+        self.llm = build_poll_llm(settings.llm_provider, settings.openai_api_key, settings.openai_model)
 
     def handle_message(self, sender: str, body: str) -> PollResponse:
         sender_hash = hash_msisdn(sender, self.settings.poll_hash_salt)
@@ -364,7 +371,9 @@ class PollPodManager:
             for status in statuses
             if (status.get("state") or {}).get("status") == ACTIVE
         ]
-        if is_contextless_vote(body):
+        if is_contextless_vote(body) or (
+            active_statuses and is_contextless_vote_with_llm(body, self.llm)
+        ):
             eligible = [
                 status
                 for status in active_statuses
@@ -396,6 +405,8 @@ class PollPodManager:
             state = PollState.from_dict(state_data)
             decision = classify_vote(body, state, sender_hash)
             if decision.kind == "ask":
+                decision = classify_vote_with_llm(body, state, sender_hash, self.llm)
+            if decision.kind == "ask":
                 continue
             if state.creator_hash == sender_hash:
                 own_match = (status, state, decision)
@@ -408,7 +419,18 @@ class PollPodManager:
             status, state, decision = other_matches[0]
             if state.is_expired():
                 return PollResponse(True, format_poll_closed(state.language))
-            result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
+            if decision.kind == "invalid":
+                return PollResponse(True, decision.reply)
+            result = self._exec(
+                status["pod_name"],
+                "vote",
+                "--voter-hash",
+                sender_hash,
+                "--message",
+                body,
+                "--force-option",
+                decision.option or "",
+            )
             if result.get("route_to_chat"):
                 return PollResponse(False)
             return PollResponse(bool(result.get("handled", True)), result.get("reply"))
@@ -445,6 +467,8 @@ class PollPodManager:
         for status in active_candidates:
             state = PollState.from_dict(status.get("state") or {})
             decision = resolve_pending_vote(pending.message, body, state, sender_hash)
+            if decision.kind == "ask":
+                decision = resolve_pending_vote_with_llm(pending.message, body, state, sender_hash, self.llm)
             if decision.kind != "ask":
                 matches.append((status, state, decision))
 
@@ -455,7 +479,16 @@ class PollPodManager:
             if decision.kind == "invalid":
                 self.pending_votes.pop(sender_hash, None)
                 return PollResponse(True, decision.reply)
-            result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", pending.message)
+            result = self._exec(
+                status["pod_name"],
+                "vote",
+                "--voter-hash",
+                sender_hash,
+                "--message",
+                pending.message,
+                "--force-option",
+                decision.option or "",
+            )
             if result.get("route_to_chat"):
                 result = self._exec(status["pod_name"], "vote", "--voter-hash", sender_hash, "--message", body)
             self.pending_votes.pop(sender_hash, None)

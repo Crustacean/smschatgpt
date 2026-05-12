@@ -13,6 +13,7 @@ from .polls import (
     CLOSED,
     PollDraft,
     PollState,
+    VoteDecision,
     build_pending_poll,
     classify_vote,
     confirm_poll,
@@ -24,9 +25,13 @@ from .polls import (
     format_poll_closed,
     format_poll_draft,
     format_poll_started,
+    is_contextless_vote,
+    match_vote_option,
     merge_draft,
     parse_creator_command,
     record_vote,
+    resolve_pending_vote,
+    vote_decision_for_option,
 )
 
 
@@ -47,6 +52,7 @@ def main() -> None:
     vote = subparsers.add_parser("vote")
     vote.add_argument("--voter-hash", required=True)
     vote.add_argument("--message", required=True)
+    vote.add_argument("--force-option")
 
     subparsers.add_parser("status")
     subparsers.add_parser("finalize")
@@ -65,7 +71,7 @@ def main() -> None:
     elif args.action == "cancel":
         result = cancel_poll(state_path)
     elif args.action == "vote":
-        result = vote_poll(state_path, args.voter_hash, args.message)
+        result = vote_poll(state_path, args.voter_hash, args.message, llm, args.force_option)
     elif args.action == "status":
         result = status_poll(state_path)
     elif args.action == "finalize":
@@ -125,11 +131,22 @@ def cancel_poll(path: Path) -> dict[str, Any]:
     return {"handled": True, "reply": format_poll_canceled(state.language if state else "en")}
 
 
-def vote_poll(path: Path, voter_hash: str, message: str) -> dict[str, Any]:
+def vote_poll(
+    path: Path,
+    voter_hash: str,
+    message: str,
+    llm: LlmClient | None = None,
+    force_option: str | None = None,
+) -> dict[str, Any]:
     state = load_state(path)
     if not state or state.status != ACTIVE:
         return {"handled": False, "route_to_chat": True}
-    decision = classify_vote(message, state, voter_hash)
+    if force_option and force_option in state.options:
+        decision = vote_decision_for_option(force_option, state, voter_hash)
+    else:
+        decision = classify_vote(message, state, voter_hash)
+        if decision.kind == "ask" and llm:
+            decision = classify_vote_with_llm(message, state, voter_hash, llm)
     if state.is_expired():
         if decision.kind == "ask":
             return {"handled": False, "route_to_chat": True}
@@ -141,6 +158,102 @@ def vote_poll(path: Path, voter_hash: str, message: str) -> dict[str, Any]:
     state = record_vote(state, voter_hash, decision.option or "")
     save_state(path, state)
     return {"handled": True, "reply": decision.reply, "state": state.to_dict()}
+
+
+def classify_vote_with_llm(message: str, state: PollState, voter_hash: str, llm: LlmClient) -> VoteDecision:
+    option = infer_vote_option_with_llm(message, state, llm)
+    if not option:
+        return classify_vote(message, state, voter_hash)
+    return vote_decision_for_option(option, state, voter_hash)
+
+
+def resolve_pending_vote_with_llm(
+    pending_message: str,
+    context_message: str,
+    state: PollState,
+    voter_hash: str,
+    llm: LlmClient,
+) -> VoteDecision:
+    decision = resolve_pending_vote(pending_message, context_message, state, voter_hash)
+    if decision.kind != "ask":
+        return decision
+    if not match_vote_option(pending_message, state.options):
+        return decision
+    option = infer_vote_option_with_llm(context_message, state, llm, pending_vote=pending_message)
+    if not option:
+        return decision
+    return vote_decision_for_option(option, state, voter_hash)
+
+
+def is_contextless_vote_with_llm(message: str, llm: LlmClient) -> bool:
+    if is_contextless_vote(message):
+        return True
+    prompt = (
+        "Decide whether this inbound SMS is only a context-free vote fragment, "
+        "such as a standalone yes, no, maybe, or option number in any language. "
+        "Return false for normal questions, greetings, or votes that include poll topic context. "
+        "Return strict JSON only with keys: contextless_vote (boolean), language (ISO 639-1 code or null). "
+        f"SMS: {message}"
+    )
+    try:
+        response = llm.complete(
+            [{"role": "user", "content": prompt}],
+            max_tokens=80,
+            temperature=0,
+        )
+    except Exception:
+        return False
+    parsed = _parse_vote_json(response)
+    return bool(parsed and parsed.get("contextless_vote"))
+
+
+def infer_vote_option_with_llm(
+    message: str,
+    state: PollState,
+    llm: LlmClient,
+    pending_vote: str | None = None,
+) -> str | None:
+    options = ", ".join(f"{index}) {option}" for index, option in enumerate(state.options, start=1))
+    pending_instruction = ""
+    if pending_vote:
+        pending_instruction = (
+            "The voter previously sent this context-free vote-like SMS: "
+            f"{pending_vote!r}. Use that only to infer the intended option. "
+            "Use the current SMS only to decide whether the poll context matches. "
+        )
+    prompt = (
+        "Classify whether an inbound SMS is a vote for exactly this poll. "
+        "The SMS may be in any language supported by the model, and it may differ "
+        "from the poll language. Match by semantic topic, not just shared words. "
+        "Reject if the SMS is a normal question, unrelated to the poll, ambiguous, "
+        "or lacks enough poll context. "
+        "For yes/no-style options, map multilingual affirmative or negative intent "
+        "to the exact option label. "
+        f"{pending_instruction}"
+        "Return strict JSON only with keys: matches (boolean), option (string or null), "
+        "language (ISO 639-1 code or null). "
+        f"Poll question: {state.question}\n"
+        f"Poll options: {options}\n"
+        f"Current SMS: {message}"
+    )
+    try:
+        response = llm.complete(
+            [{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0,
+        )
+    except Exception:
+        return None
+    parsed = _parse_vote_json(response)
+    if not parsed or not parsed.get("matches"):
+        return None
+    raw_option = str(parsed.get("option") or "").strip()
+    if not raw_option:
+        return None
+    for option in state.options:
+        if raw_option == option or raw_option.lower() == option.lower():
+            return option
+    return match_vote_option(raw_option, state.options)
 
 
 def status_poll(path: Path) -> dict[str, Any]:
@@ -207,7 +320,7 @@ def extract_draft(message: str, llm: LlmClient) -> PollDraft:
 
 def summarize_results(state: PollState, llm: LlmClient, reply_limit: int = SMS_REPLY_LIMIT) -> str:
     counts = format_counts(state)
-    language_name = "Kiswahili" if state.language == "sw" else "English"
+    language_name = _language_prompt_name(state.language)
     prompt = (
         f"Summarize these anonymous SMS poll results in {language_name}. "
         f"{sms_response_instruction(reply_limit)} "
@@ -225,6 +338,23 @@ def summarize_results(state: PollState, llm: LlmClient, reply_limit: int = SMS_R
     except Exception:
         pass
     return clamp_sms_reply(counts, reply_limit)
+
+
+def _language_prompt_name(language: str) -> str:
+    normalized = (language or "en").strip().lower()
+    names = {
+        "en": "English",
+        "sw": "Kiswahili",
+        "fr": "French",
+        "es": "Spanish",
+        "pt": "Portuguese",
+        "de": "German",
+        "it": "Italian",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "zh": "Chinese",
+    }
+    return names.get(normalized, f"the language identified by ISO 639 code '{normalized}'")
 
 
 def _parse_draft_json(response: str) -> PollDraft | None:
@@ -246,6 +376,18 @@ def _parse_draft_json(response: str) -> PollDraft | None:
         duration_seconds=int(duration) if duration else None,
         language=str(data.get("language") or "").strip(),
     )
+
+
+def _parse_vote_json(response: str) -> dict[str, Any] | None:
+    start = response.find("{")
+    end = response.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(response[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 if __name__ == "__main__":

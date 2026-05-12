@@ -6,7 +6,16 @@ from pathlib import Path
 from .config import Settings
 from .llm import LlmClient
 from .messages import clamp_sms_reply
-from .poll_worker import build_poll_llm, extract_draft, load_state, save_state, summarize_results
+from .poll_worker import (
+    build_poll_llm,
+    classify_vote_with_llm,
+    extract_draft,
+    is_contextless_vote_with_llm,
+    load_state,
+    resolve_pending_vote_with_llm,
+    save_state,
+    summarize_results,
+)
 from .polls import (
     ACTIVE,
     CLOSED,
@@ -155,7 +164,9 @@ class LocalPollManager:
             for creator_hash, state in states.items()
             if state.status == ACTIVE
         }
-        if is_contextless_vote(body):
+        if is_contextless_vote(body) or (
+            active_states and is_contextless_vote_with_llm(body, self.llm)
+        ):
             eligible = {
                 creator_hash: state
                 for creator_hash, state in active_states.items()
@@ -174,6 +185,8 @@ class LocalPollManager:
         own_match = None
         for creator_hash, state in active_states.items():
             decision = classify_vote(body, state, sender_hash)
+            if decision.kind == "ask":
+                decision = classify_vote_with_llm(body, state, sender_hash, self.llm)
             if decision.kind == "ask":
                 continue
             if creator_hash == sender_hash:
@@ -225,6 +238,8 @@ class LocalPollManager:
         matches: list[tuple[str, PollState, object]] = []
         for creator_hash, state in active_candidates.items():
             decision = resolve_pending_vote(pending.message, body, state, sender_hash)
+            if decision.kind == "ask":
+                decision = resolve_pending_vote_with_llm(pending.message, body, state, sender_hash, self.llm)
             if decision.kind != "ask":
                 matches.append((creator_hash, state, decision))
 

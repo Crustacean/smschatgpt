@@ -14,7 +14,15 @@ from sms_chatgpt.messages import (
     validate_inbound_sms,
 )
 from sms_chatgpt.poll_manager import LocalPollManager
-from sms_chatgpt.poll_worker import amend_poll, build_poll_llm, load_state, save_state
+from sms_chatgpt.poll_worker import (
+    amend_poll,
+    build_poll_llm,
+    classify_vote_with_llm,
+    extract_draft,
+    load_state,
+    resolve_pending_vote_with_llm,
+    save_state,
+)
 from sms_chatgpt.polls import (
     build_pending_poll,
     classify_vote,
@@ -24,6 +32,7 @@ from sms_chatgpt.polls import (
     extract_draft_from_text,
     format_counts,
     hash_msisdn,
+    is_contextless_vote,
     parse_duration_seconds,
     record_vote,
     resolve_pending_vote,
@@ -241,6 +250,89 @@ class PollsTest(unittest.TestCase):
         self.assertEqual(pending_number.option, "Yes")
         self.assertEqual(pending_maybe.kind, "ask")
 
+    def test_classifies_multilingual_contextual_vote(self) -> None:
+        state = confirm_poll(
+            build_pending_poll(
+                "creator",
+                extract_draft_from_text("Create a poll to build a school library options: Yes, No for 60s"),
+            )
+        )
+
+        swahili_positive = classify_vote("Ninakubali kujenga maktaba ya shule", state, "voter")
+        swahili_context_only = classify_vote("kujenga maktaba ya shule", state, "another-voter")
+        swahili_negative = classify_vote("Sipendi kujenga maktaba ya shule", state, "third-voter")
+        unrelated_build = classify_vote("Yes build that wall", state, "wall-voter")
+
+        self.assertEqual(swahili_positive.kind, "valid")
+        self.assertEqual(swahili_positive.option, "Yes")
+        self.assertEqual(swahili_context_only.kind, "valid")
+        self.assertEqual(swahili_context_only.option, "Yes")
+        self.assertEqual(swahili_negative.kind, "valid")
+        self.assertEqual(swahili_negative.option, "No")
+        self.assertEqual(unrelated_build.kind, "ask")
+
+    def test_llm_classifies_vote_in_arbitrary_language(self) -> None:
+        state = confirm_poll(
+            build_pending_poll(
+                "creator",
+                extract_draft_from_text("Create a poll to build a school library options: Yes, No for 60s"),
+            )
+        )
+        llm = _JsonLlm(['{"matches":true,"option":"Yes","language":"es"}'])
+
+        decision = classify_vote_with_llm(
+            "Estoy a favor de construir la biblioteca escolar",
+            state,
+            "voter",
+            llm,
+        )
+
+        self.assertEqual(decision.kind, "valid")
+        self.assertEqual(decision.option, "Yes")
+        self.assertIn("any language", llm.prompts[0])
+
+    def test_llm_resolves_pending_vote_context_in_arbitrary_language(self) -> None:
+        state = confirm_poll(
+            build_pending_poll(
+                "creator",
+                extract_draft_from_text("Create a poll to build a school library options: Yes, No for 60s"),
+            )
+        )
+        llm = _JsonLlm(['{"matches":true,"option":"No","language":"fr"}'])
+
+        decision = resolve_pending_vote_with_llm(
+            "No",
+            "Je refuse de construire la bibliotheque scolaire",
+            state,
+            "voter",
+            llm,
+        )
+
+        self.assertEqual(decision.kind, "valid")
+        self.assertEqual(decision.option, "No")
+
+    def test_contextless_votes_include_common_languages(self) -> None:
+        self.assertTrue(is_contextless_vote("Sí"))
+        self.assertTrue(is_contextless_vote("Oui"))
+        self.assertTrue(is_contextless_vote("Não"))
+        self.assertTrue(is_contextless_vote("Peut-être"))
+
+    def test_openai_detected_language_code_is_preserved(self) -> None:
+        llm = _JsonLlm(
+            [
+                (
+                    '{"question":"Construir una biblioteca escolar?",'
+                    '"options":["Si","No"],"duration_seconds":60,"language":"es"}'
+                )
+            ]
+        )
+
+        draft = extract_draft("Crear una encuesta para construir una biblioteca escolar por 60 segundos", llm)
+        state = build_pending_poll("creator", draft)
+
+        self.assertEqual(draft.language, "es")
+        self.assertEqual(state.language, "es")
+
     def test_classifies_non_vote_as_ask(self) -> None:
         state = confirm_poll(build_pending_poll("creator", extract_draft_from_text("poll on well options: Yes, No for 60s")))
 
@@ -363,6 +455,75 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertIn("Rasimu ya kura", draft.reply or "")
             self.assertIn("Chaguo: 1) Ndio 2) Hapana", draft.reply or "")
             self.assertIn("Muda: 90s", draft.reply or "")
+
+    def test_english_poll_accepts_swahili_contextual_vote(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message(
+                "+15550000001",
+                "Create a poll to build a school library options: Yes, No for 60 seconds",
+            )
+            manager.handle_message("+15550000001", "YES")
+            vote = manager.handle_message("+15550000002", "Ninakubali kujenga maktaba ya shule")
+            unrelated = manager.handle_message("+15550000003", "Yes build that wall")
+
+            self.assertEqual(vote.reply, "Vote recorded: Yes.")
+            self.assertFalse(unrelated.handled)
+
+    def test_english_poll_accepts_openai_classified_vote_language(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message(
+                "+15550000001",
+                "Create a poll to build a school library options: Yes, No for 60 seconds",
+            )
+            manager.handle_message("+15550000001", "YES")
+            manager.llm = _JsonLlm(
+                [
+                    '{"contextless_vote":false,"language":"es"}',
+                    '{"matches":true,"option":"Yes","language":"es"}',
+                ]
+            )
+            vote = manager.handle_message("+15550000002", "Estoy a favor de construir la biblioteca escolar")
+
+            self.assertEqual(vote.reply, "Vote recorded: Yes.")
+
+    def test_openai_detects_contextless_vote_in_other_language(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message(
+                "+15550000001",
+                "Create a poll to build a school library options: Yes, No for 60 seconds",
+            )
+            manager.handle_message("+15550000001", "YES")
+            manager.llm = _JsonLlm(['{"contextless_vote":true,"language":"ar"}'])
+            pending = manager.handle_message("+15550000002", "نعم")
+
+            self.assertIn("Which poll is this vote for?", pending.reply or "")
+
+    def test_contextless_vote_in_other_language_goes_pending(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message(
+                "+15550000001",
+                "Create a poll to build a school library options: Yes, No for 60 seconds",
+            )
+            manager.handle_message("+15550000001", "YES")
+            pending = manager.handle_message("+15550000002", "Sí")
+
+            self.assertIn("Which poll is this vote for?", pending.reply or "")
 
     def test_swahili_poll_system_replies_match_creator_language(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -520,6 +681,23 @@ class _FakeSmsTransport:
 
     def send_sms(self, recipient: str, body: str) -> None:
         self.sent.append((recipient, body))
+
+
+class _JsonLlm:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = responses
+        self.prompts: list[str] = []
+
+    def respond(self, message: str, history=None, reply_limit: int = 140) -> str:
+        del history, reply_limit
+        return message
+
+    def complete(self, messages, max_tokens: int = 160, temperature: float = 0.4) -> str:
+        del max_tokens, temperature
+        self.prompts.append(messages[-1]["content"])
+        if not self.responses:
+            return '{"matches":false,"option":null,"language":null}'
+        return self.responses.pop(0)
 
 
 def _settings(

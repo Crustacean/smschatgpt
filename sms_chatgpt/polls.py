@@ -16,14 +16,91 @@ DEFAULT_LANGUAGE = "en"
 SWAHILI = "sw"
 CONFIRM_WORDS = {"yes", "y", "confirm", "ok", "okay", "approve", "start", "ndio", "ndiyo", "naam"}
 CANCEL_WORDS = {"cancel", "stop", "ghairi"}
-YES_WORDS = {"yes", "y", "yeah", "yep", "true", "agree", "approve", "ndio", "ndiyo", "naam"}
-NO_WORDS = {"no", "n", "nope", "false", "disagree", "reject", "hapana", "la"}
-MAYBE_WORDS = {"maybe", "perhaps", "unsure", "not sure", "labda"}
-YES_OPTION_LABELS = {"yes", "y", "ndio", "ndiyo", "naam"}
-NO_OPTION_LABELS = {"no", "n", "hapana", "la"}
+YES_WORDS = {
+    "yes",
+    "y",
+    "yeah",
+    "yep",
+    "true",
+    "agree",
+    "approve",
+    "si",
+    "oui",
+    "sim",
+    "ja",
+    "da",
+    "ndio",
+    "ndiyo",
+    "naam",
+    "sawa",
+}
+NO_WORDS = {
+    "no",
+    "n",
+    "nope",
+    "false",
+    "disagree",
+    "reject",
+    "non",
+    "nao",
+    "nein",
+    "niet",
+    "nyet",
+    "hapana",
+    "la",
+}
+MAYBE_WORDS = {"maybe", "perhaps", "unsure", "not sure", "quizas", "talvez", "peut etre", "vielleicht", "labda"}
+YES_OPTION_LABELS = {"yes", "y", "si", "oui", "sim", "ja", "da", "ndio", "ndiyo", "naam", "sawa"}
+NO_OPTION_LABELS = {"no", "n", "non", "nao", "nein", "niet", "nyet", "hapana", "la"}
 QUESTION_WORDS = {"what", "why", "how", "when", "where", "who", "which", "can", "could", "should", "would"}
-POSITIVE_VOTE_WORDS = {"support", "favor", "favour", "approve", "agree", "unga"}
-NEGATIVE_VOTE_WORDS = {"against", "oppose", "opposed", "reject", "pinga"}
+POSITIVE_VOTE_WORDS = {
+    "support",
+    "favor",
+    "favour",
+    "approve",
+    "agree",
+    "kubali",
+    "nakubali",
+    "ninakubali",
+    "tunakubali",
+    "unga",
+    "naunga",
+    "ninaunga",
+}
+NEGATIVE_VOTE_WORDS = {
+    "against",
+    "oppose",
+    "opposed",
+    "reject",
+    "kataa",
+    "nakataa",
+    "ninakataa",
+    "pinga",
+    "napinga",
+    "ninapinga",
+    "sikubali",
+    "sipendi",
+}
+CONTEXT_ALIASES = {
+    "afya": "health",
+    "chimba": "dig",
+    "fedha": "fund",
+    "fadhili": "fund",
+    "jamii": "community",
+    "jenga": "build",
+    "kujenga": "build",
+    "kuchimba": "dig",
+    "kufadhili": "fund",
+    "maji": "water",
+    "maktaba": "library",
+    "shool": "school",
+    "shule": "school",
+    "ujenzi": "build",
+    "ufadhili": "fund",
+    "ukuta": "wall",
+    "visima": "well",
+    "kisima": "well",
+}
 DEFAULT_POLL_INTENT_PHRASES = {
     "poll",
     "vote",
@@ -293,7 +370,13 @@ def is_contextless_vote(message: str) -> bool:
 def has_vote_context(message: str, question: str | None) -> bool:
     if not question:
         return False
-    return bool(_context_tokens(message) & _context_tokens(question))
+    message_tokens = _context_tokens(message)
+    question_tokens = _context_tokens(question)
+    if not message_tokens or not question_tokens:
+        return False
+    overlap = message_tokens & question_tokens
+    required_matches = 1 if len(question_tokens) == 1 else 2
+    return len(overlap) >= required_matches
 
 
 def format_pending_vote_context_request() -> str:
@@ -385,6 +468,10 @@ def _vote_decision_for_option(option: str, state: PollState, voter_hash: str) ->
     if voter_hash in state.votes:
         return VoteDecision("invalid", reply=format_duplicate_vote(state.language))
     return VoteDecision("valid", option=option, reply=format_vote_recorded(option, state.language))
+
+
+def vote_decision_for_option(option: str, state: PollState, voter_hash: str) -> VoteDecision:
+    return _vote_decision_for_option(option, state, voter_hash)
 
 
 def match_vote_option(message: str, options: list[str], question: str | None = None) -> str | None:
@@ -645,6 +732,10 @@ def _normalize_language(language: str) -> str:
     normalized = language.strip().lower()
     if normalized in {"sw", "swahili", "kiswahili"}:
         return SWAHILI
+    if normalized in {"en", "eng", "english"}:
+        return DEFAULT_LANGUAGE
+    if re.fullmatch(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})?", normalized):
+        return normalized
     return DEFAULT_LANGUAGE
 
 
@@ -670,7 +761,10 @@ def _format_missing(state: PollState) -> str:
 
 
 def _normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower().strip(".!?:;"))
+    normalized = unicodedata.normalize("NFKD", text.strip().lower().strip(".!?:;"))
+    normalized = "".join(character for character in normalized if not unicodedata.combining(character))
+    normalized = normalized.replace("-", " ")
+    return re.sub(r"\s+", " ", normalized)
 
 
 def _yes_no_options(options: list[str]) -> tuple[str | None, str | None]:
@@ -704,7 +798,8 @@ def _looks_like_bad_vote(message: str) -> bool:
 def _yes_no_vote_intent(message: str) -> str | None:
     if "?" in message:
         return None
-    words = re.findall(r"[a-zA-Z']+", message.lower())
+    normalized = _normalize(message)
+    words = re.findall(r"[a-zA-Z']+", normalized)
     if not words or len(words) > 10:
         return None
     if len(words) > 1 and words[1] in QUESTION_WORDS:
@@ -713,7 +808,6 @@ def _yes_no_vote_intent(message: str) -> str | None:
         return "yes"
     if words[0] in NO_WORDS:
         return "no"
-    normalized = _normalize(message)
     if (
         "do not" in normalized
         or "don't" in normalized
@@ -766,7 +860,11 @@ def _vote_context_matches(message: str, question: str | None) -> bool:
     question_tokens = _context_tokens(question)
     if not message_tokens:
         return True
-    return bool(message_tokens & question_tokens)
+    if not question_tokens:
+        return False
+    overlap = message_tokens & question_tokens
+    required_matches = 1 if len(question_tokens) == 1 else 2
+    return len(overlap) >= required_matches
 
 
 def _context_tokens(text: str) -> set[str]:
@@ -779,6 +877,8 @@ def _context_tokens(text: str) -> set[str]:
 
 
 def _stem_context_word(word: str) -> str:
+    if word in CONTEXT_ALIASES:
+        return CONTEXT_ALIASES[word]
     if len(word) > 5 and word.endswith("ing"):
         word = word[:-3]
         if len(word) > 2 and word[-1] == word[-2]:
@@ -787,7 +887,7 @@ def _stem_context_word(word: str) -> str:
         word = word[:-2]
     elif len(word) > 4 and word.endswith("s"):
         word = word[:-1]
-    return word
+    return CONTEXT_ALIASES.get(word, word)
 
 
 def _valid_vote_help(options: list[str], language: str = DEFAULT_LANGUAGE) -> str:
