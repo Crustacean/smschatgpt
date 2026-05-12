@@ -82,7 +82,7 @@ def main() -> None:
     elif args.action == "finalize":
         result = finalize_poll(state_path, llm, settings.sms_reply_limit)
     elif args.action == "timeout":
-        result = timeout_pending_poll(state_path)
+        result = timeout_pending_poll(state_path, llm, settings.sms_reply_limit)
     elif args.action == "touch":
         result = touch_poll(state_path)
     else:
@@ -289,7 +289,11 @@ def status_poll(path: Path, pending_idle_seconds: int = 0) -> dict[str, Any]:
     }
 
 
-def timeout_pending_poll(path: Path) -> dict[str, Any]:
+def timeout_pending_poll(
+    path: Path,
+    llm: LlmClient | None = None,
+    reply_limit: int = SMS_REPLY_LIMIT,
+) -> dict[str, Any]:
     state = load_state(path)
     if not state:
         return {"handled": False}
@@ -298,7 +302,7 @@ def timeout_pending_poll(path: Path) -> dict[str, Any]:
     if state.status != PENDING:
         return {"handled": False, "state": state.to_dict()}
     state.status = CLOSED
-    state.result_reply = format_pending_poll_timed_out(state.language)
+    state.result_reply = pending_poll_timeout_reply(state, llm, reply_limit)
     save_state(path, state)
     return {"handled": True, "reply": state.result_reply, "state": state.to_dict()}
 
@@ -380,6 +384,34 @@ def summarize_results(state: PollState, llm: LlmClient, reply_limit: int = SMS_R
     return clamp_sms_reply(counts, reply_limit)
 
 
+def pending_poll_timeout_reply(
+    state: PollState,
+    llm: LlmClient | None = None,
+    reply_limit: int = SMS_REPLY_LIMIT,
+) -> str:
+    fallback = clamp_sms_reply(format_pending_poll_timed_out(state.language), reply_limit)
+    if state.language in {"en", "sw"} or llm is None:
+        return fallback
+    language_name = _language_prompt_name(state.language)
+    prompt = (
+        f"Write this SMS notification in {language_name}. "
+        f"{sms_response_instruction(reply_limit)} "
+        "Meaning: The pending poll waited too long for more details or confirmation and was canceled. "
+        "Do not include phone numbers, hashes, or internal system details."
+    )
+    try:
+        response = llm.complete(
+            [{"role": "user", "content": prompt}],
+            max_tokens=max_tokens_for_sms_limit(reply_limit),
+            temperature=0,
+        )
+    except Exception:
+        return fallback
+    if _looks_like_echoed_prompt(response):
+        return fallback
+    return clamp_sms_reply(response, reply_limit) if response.strip() else fallback
+
+
 def _language_prompt_name(language: str) -> str:
     normalized = (language or "en").strip().lower()
     names = {
@@ -395,6 +427,11 @@ def _language_prompt_name(language: str) -> str:
         "zh": "Chinese",
     }
     return names.get(normalized, f"the language identified by ISO 639 code '{normalized}'")
+
+
+def _looks_like_echoed_prompt(response: str) -> bool:
+    lowered = response.lower()
+    return "write this sms notification" in lowered or "meaning:" in lowered
 
 
 def _parse_draft_json(response: str) -> PollDraft | None:

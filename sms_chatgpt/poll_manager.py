@@ -12,6 +12,7 @@ from .poll_worker import (
     extract_draft,
     is_contextless_vote_with_llm,
     load_state,
+    pending_poll_timeout_reply,
     resolve_pending_vote_with_llm,
     save_state,
     summarize_results,
@@ -30,7 +31,6 @@ from .polls import (
     format_duplicate_vote,
     format_multiple_polls,
     format_ongoing_poll,
-    format_pending_poll_timed_out,
     format_pending_vote_context_request_for_language,
     format_pending_vote_expired,
     format_pending_vote_not_matched,
@@ -155,7 +155,7 @@ class LocalPollManager:
                 continue
             if state.is_pending_idle_expired(self.settings.poll_pending_idle_seconds):
                 state.status = CLOSED
-                state.result_reply = format_pending_poll_timed_out(state.language)
+                state.result_reply = pending_poll_timeout_reply(state, self.llm, self.settings.sms_reply_limit)
                 save_state(self._state_path(creator_hash), state)
                 outbound.append(OutboundSms(creator_phone, clamp_sms_reply(state.result_reply, self.settings.sms_reply_limit), creator_hash))
                 continue

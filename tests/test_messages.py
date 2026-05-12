@@ -402,6 +402,21 @@ class PollsTest(unittest.TestCase):
             self.assertIsNotNone(saved)
             self.assertEqual(saved.status, CLOSED)
 
+    def test_pending_poll_timeout_uses_creator_language(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "poll.json"
+            state = build_pending_poll("creator", extract_draft_from_text("poll to fund digging of a well"))
+            state.language = "es"
+            save_state(state_path, state)
+            llm = _JsonLlm(["La encuesta espero demasiado y fue cancelada."])
+
+            result = timeout_pending_poll(state_path, llm)
+            saved = load_state(state_path)
+
+            self.assertEqual(result["reply"], "La encuesta espero demasiado y fue cancelada.")
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved.result_reply, "La encuesta espero demasiado y fue cancelada.")
+
 
 class LocalPollManagerTest(unittest.TestCase):
     def test_poll_flow_and_chat_fallback(self) -> None:
@@ -479,6 +494,26 @@ class LocalPollManagerTest(unittest.TestCase):
             self.assertIsNotNone(load_state(state_path))
             manager.ack_results_sent(outbound)
             self.assertIsNone(load_state(state_path))
+
+    def test_pending_poll_timeout_outbound_uses_creator_language(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            state_file = Path(temp_dir) / "poll.json"
+            settings = _settings(state_file, poll_pending_idle_seconds=60)
+            manager = LocalPollManager(settings)
+
+            manager.handle_message("+15550000001", "poll to fund digging of a well")
+            creator_hash = hash_msisdn("+15550000001", settings.poll_hash_salt)
+            state_path = manager._state_path(creator_hash)
+            state = load_state(state_path)
+            self.assertIsNotNone(state)
+            state.language = "es"
+            state.last_activity_at = 0
+            save_state(state_path, state)
+            manager.llm = _JsonLlm(["La encuesta espero demasiado y fue cancelada."])
+
+            outbound = manager.close_expired()
+
+            self.assertEqual(outbound[0].body, "La encuesta espero demasiado y fue cancelada.")
 
     def test_swahili_poll_request_starts_poll_flow_without_llm(self) -> None:
         with TemporaryDirectory() as temp_dir:
